@@ -1,0 +1,1009 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>systemd 依赖图绘制工具</title>
+    <!-- 引入 js-yaml 和 d3 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/js-yaml/4.1.0/js-yaml.min.js"></script>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        /* ===== CSS 变量（亮色/暗色） ===== */
+        :root {
+            --bg: #f5f7fa;
+            --canvas-bg: #f8fafc;
+            --card-bg: #ffffff;
+            --toolbar-bg: #ffffff;
+            --input-bg: #f8fafc;
+            --text: #1e293b;
+            --muted: #64748b;
+            --border: #e2e8f0;
+            --shadow: rgba(0,0,0,0.05);
+            --button-bg: #f1f5f9;
+            --button-border: #cbd5e1;
+            --button-hover: #e2e8f0;
+            --primary: #3b82f6;
+            --primary-hover: #2563eb;
+            --primary-text: #fff;
+            --legend-bg: rgba(255,255,255,0.92);
+            --legend-border: #e2e8f0;
+            --node-stroke: #1e293b;
+            --node-text: #0f172a;
+            --link-color: #94a3b8;
+            --strong-color: #dc2626;
+            --weak-color: #3b82f6;
+            --conflict-color: #f59e0b;
+            --service-fill: #dbeafe;
+            --service-stroke: #3b82f6;
+            --target-fill: #fef3c7;
+            --target-stroke: #d97706;
+            --mount-fill: #d1fae5;
+            --mount-stroke: #10b981;
+            --slice-fill: #f3e8ff;
+            --slice-stroke: #8b5cf6;
+            --socket-fill: #fce7f3;
+            --socket-stroke: #ec4899;
+            --unknown-fill: #f1f5f9;
+            --unknown-stroke: #64748b;
+            --loading-bg: rgba(255,255,255,0.8);
+        }
+
+        /* 暗色主题覆盖 */
+        [data-theme="dark"] {
+            --bg: #0f172a;
+            --canvas-bg: #1e293b;
+            --card-bg: #1e293b;
+            --toolbar-bg: #1e293b;
+            --input-bg: #0f172a;
+            --text: #e2e8f0;
+            --muted: #94a3b8;
+            --border: #334155;
+            --shadow: rgba(0,0,0,0.3);
+            --button-bg: #334155;
+            --button-border: #475569;
+            --button-hover: #475569;
+            --primary: #3b82f6;
+            --primary-hover: #60a5fa;
+            --primary-text: #fff;
+            --legend-bg: rgba(30,41,59,0.92);
+            --legend-border: #334155;
+            --node-stroke: #94a3b8;
+            --node-text: #e2e8f0;
+            --link-color: #64748b;
+            --strong-color: #f87171;
+            --weak-color: #60a5fa;
+            --conflict-color: #fbbf24;
+            --service-fill: #1e3a5f;
+            --service-stroke: #60a5fa;
+            --target-fill: #5f3e0a;
+            --target-stroke: #f59e0b;
+            --mount-fill: #064e3b;
+            --mount-stroke: #34d399;
+            --slice-fill: #2e1065;
+            --slice-stroke: #a78bfa;
+            --socket-fill: #4c0519;
+            --socket-stroke: #f472b6;
+            --unknown-fill: #334155;
+            --unknown-stroke: #94a3b8;
+            --loading-bg: rgba(15,23,42,0.8);
+        }
+
+        /* ===== 全局样式 ===== */
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            height: 100vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            transition: background 0.2s, color 0.2s;
+        }
+
+        /* 工具栏 */
+        .toolbar {
+            background: var(--toolbar-bg);
+            border-bottom: 1px solid var(--border);
+            padding: 10px 16px;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 10px;
+            flex-shrink: 0;
+            z-index: 10;
+            transition: background 0.2s, border-color 0.2s;
+        }
+        .toolbar .title {
+            font-weight: 600;
+            font-size: 1.1rem;
+            margin-right: 12px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .toolbar .title small {
+            font-weight: 400;
+            font-size: 0.75rem;
+            color: var(--muted);
+        }
+        .toolbar .btn-group {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            align-items: center;
+        }
+        .toolbar button {
+            background: var(--button-bg);
+            border: 1px solid var(--button-border);
+            border-radius: 6px;
+            padding: 6px 14px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: 0.15s;
+            color: var(--text);
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            white-space: nowrap;
+        }
+        .toolbar button:hover { background: var(--button-hover); border-color: var(--muted); }
+        .toolbar button.primary { background: var(--primary); border-color: var(--primary); color: var(--primary-text); }
+        .toolbar button.primary:hover { background: var(--primary-hover); }
+        .toolbar input[type="file"] { display: none; }
+
+        /* 输入面板（默认折叠） */
+        .input-panel {
+            background: var(--card-bg);
+            border-bottom: 1px solid var(--border);
+            padding: 12px 16px;
+            flex-shrink: 0;
+            transition: max-height 0.3s ease, padding 0.3s, background 0.2s;
+            max-height: 300px;
+            overflow: hidden;
+        }
+        .input-panel.collapsed {
+            max-height: 0;
+            padding: 0 16px;
+            border-bottom: none;
+        }
+        .input-panel textarea {
+            width: 100%;
+            height: 120px;
+            font-family: 'Menlo', 'Consolas', monospace;
+            font-size: 0.8rem;
+            padding: 8px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            resize: vertical;
+            background: var(--input-bg);
+            color: var(--text);
+            transition: background 0.2s, color 0.2s, border-color 0.2s;
+        }
+        .input-panel .hint {
+            font-size: 0.8rem;
+            color: var(--muted);
+            margin-top: 4px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        /* 过滤面板 */
+        .filter-panel {
+            background: var(--card-bg);
+            border-bottom: 1px solid var(--border);
+            padding: 8px 16px;
+            flex-shrink: 0;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            align-items: flex-start;
+            max-height: 260px;
+            overflow-y: auto;
+            transition: background 0.2s, border-color 0.2s;
+        }
+        .filter-panel .filter-group {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 6px 12px;
+            font-size: 0.8rem;
+        }
+        .filter-panel .filter-group label {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            cursor: pointer;
+            color: var(--text);
+        }
+        .filter-panel .filter-group input[type="checkbox"] {
+            margin: 0;
+            width: 14px;
+            height: 14px;
+            cursor: pointer;
+            accent-color: var(--primary);
+        }
+        .filter-panel .filter-title {
+            font-weight: 600;
+            font-size: 0.8rem;
+            color: var(--muted);
+            margin-right: 4px;
+        }
+        .filter-panel .hide-area {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 4px;
+            flex: 1;
+            min-width: 120px;
+        }
+        .filter-panel .hide-area textarea {
+            flex: 1;
+            min-width: 80px;
+            height: 40px;
+            font-family: 'Menlo', 'Consolas', monospace;
+            font-size: 0.7rem;
+            padding: 2px 4px;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            resize: vertical;
+            background: var(--input-bg);
+            color: var(--text);
+            transition: background 0.2s, color 0.2s, border-color 0.2s;
+        }
+        .filter-panel button {
+            background: var(--button-bg);
+            border: 1px solid var(--button-border);
+            border-radius: 4px;
+            padding: 2px 8px;
+            font-size: 0.7rem;
+            cursor: pointer;
+            color: var(--text);
+            transition: 0.15s;
+        }
+        .filter-panel button:hover { background: var(--button-hover); }
+        .filter-panel button.primary { background: var(--primary); border-color: var(--primary); color: var(--primary-text); }
+        .filter-panel button.danger { background: #ef4444; border-color: #dc2626; color: #fff; }
+        .filter-panel .toggle-hide-btn { align-self: center; }
+
+        /* 画布 */
+        .canvas-wrapper {
+            flex: 1;
+            position: relative;
+            background: var(--bg);
+            overflow: hidden;
+            min-height: 0;
+            transition: background 0.2s;
+        }
+        .canvas-wrapper svg {
+            display: block;
+            width: 100%;
+            height: 100%;
+            background: var(--canvas-bg);
+            cursor: grab;
+            transition: background 0.2s;
+        }
+        .canvas-wrapper svg:active { cursor: grabbing; }
+
+        /* 节点样式（使用类，以便主题切换时自动适应） */
+        .node circle {
+            stroke-width: 2px;
+            transition: fill 0.2s, stroke 0.2s;
+        }
+        .node text {
+            font-size: 10px;
+            font-weight: 500;
+            text-anchor: middle;
+            dominant-baseline: central;
+            pointer-events: none;
+            user-select: none;
+            transition: fill 0.2s;
+        }
+
+        /* 各类节点颜色（由 CSS 变量控制，主题切换自动更新） */
+        .node.kind-service circle { fill: var(--service-fill); stroke: var(--service-stroke); }
+        .node.kind-target circle { fill: var(--target-fill); stroke: var(--target-stroke); }
+        .node.kind-mount circle { fill: var(--mount-fill); stroke: var(--mount-stroke); }
+        .node.kind-slice circle { fill: var(--slice-fill); stroke: var(--slice-stroke); }
+        .node.kind-socket circle { fill: var(--socket-fill); stroke: var(--socket-stroke); }
+        .node.kind-unknown circle { fill: var(--unknown-fill); stroke: var(--unknown-stroke); }
+        /* 其他类型使用 unknown */
+        .node:not(.kind-service):not(.kind-target):not(.kind-mount):not(.kind-slice):not(.kind-socket) circle {
+            fill: var(--unknown-fill);
+            stroke: var(--unknown-stroke);
+        }
+        .node text { fill: var(--node-text); }
+
+        /* 边样式 */
+        .link { fill: none; stroke-width: 2px; stroke: var(--link-color); }
+        .link.strong { stroke: var(--strong-color); stroke-width: 2.5px; }
+        .link.weak { stroke: var(--weak-color); stroke-dasharray: 5 4; stroke-width: 2px; }
+        .link.conflict { stroke: var(--conflict-color); stroke-width: 2.5px; }
+
+        .arrow { fill: var(--link-color); }
+        .arrow.strong { fill: var(--strong-color); }
+        .arrow.weak { fill: var(--weak-color); }
+        .arrow.conflict { fill: var(--conflict-color); }
+
+        /* 图例 */
+        .legend {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            background: var(--legend-bg);
+            border: 1px solid var(--legend-border);
+            border-radius: 8px;
+            padding: 10px 14px;
+            font-size: 0.75rem;
+            box-shadow: 0 2px 8px var(--shadow);
+            pointer-events: none;
+            backdrop-filter: blur(4px);
+            transition: background 0.2s, border-color 0.2s;
+        }
+        .legend-item { display: flex; align-items: center; gap: 6px; margin: 2px 0; color: var(--text); }
+        .legend-line { width: 24px; height: 2px; border-radius: 1px; }
+        .legend-line.strong { background: var(--strong-color); }
+        .legend-line.weak { background: var(--weak-color); border-top: 2px dashed var(--weak-color); height: 0; }
+        .legend-line.conflict { background: var(--conflict-color); }
+
+        /* 加载 */
+        .loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 1.2rem;
+            color: var(--muted);
+            background: var(--loading-bg);
+            padding: 12px 24px;
+            border-radius: 8px;
+            display: none;
+            transition: background 0.2s, color 0.2s;
+        }
+        .loading.active { display: block; }
+        .stats {
+            font-size: 0.8rem;
+            color: var(--muted);
+            margin-left: auto;
+            white-space: nowrap;
+            transition: color 0.2s;
+        }
+
+        /* 暗色模式按钮 */
+        .theme-toggle {
+            background: none;
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 4px 10px;
+            font-size: 0.8rem;
+            cursor: pointer;
+            color: var(--text);
+            background: var(--button-bg);
+            transition: 0.15s;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .theme-toggle:hover { background: var(--button-hover); }
+
+        /* 移动端适配 */
+        @media (max-width: 640px) {
+            .toolbar .title { font-size: 0.95rem; margin-right: 6px; }
+            .toolbar button { padding: 4px 10px; font-size: 0.75rem; }
+            .input-panel textarea { height: 80px; }
+            .filter-panel { max-height: 200px; }
+            .filter-panel .hide-area textarea { height: 30px; }
+            .legend { bottom: 10px; right: 10px; padding: 6px 10px; font-size: 0.65rem; }
+            .stats { display: none; }
+        }
+    </style>
+</head>
+<body>
+
+<!-- 工具栏 -->
+<div class="toolbar">
+    <div class="title">📊 systemd 依赖图 <small>布局</small></div>
+    <div class="btn-group">
+        <button id="uploadBtn">📁 上传文件</button>
+        <input type="file" id="fileInput" accept=".txt,.yaml,.yml,text/plain">
+        <button id="pasteBtn">📋 粘贴文本</button>
+        <button id="drawBtn" class="primary">▶ 绘制</button>
+        <button id="toggleInputBtn">▸ 输入面板</button>
+        <button id="themeToggle" class="theme-toggle">🌙 暗色</button>
+    </div>
+    <span class="stats" id="stats"></span>
+</div>
+
+<!-- 输入面板（默认折叠） -->
+<div class="input-panel collapsed" id="inputPanel">
+    <textarea id="yamlInput" placeholder="在此粘贴 systemd dump 输出……"></textarea>
+    <div class="hint"><span>支持上传 .txt 或直接粘贴</span><span id="lineCount">0 行</span></div>
+</div>
+
+<!-- 过滤面板 -->
+<div class="filter-panel" id="filterPanel">
+    <div class="hide-area">
+        <span class="filter-title">🚫 隐藏</span>
+        <textarea id="hideInput" placeholder="每行一个单元名"></textarea>
+        <button id="applyHideBtn" class="primary">应用</button>
+        <button id="clearHideBtn">清除</button>
+        <button id="toggleHidePanelBtn" class="toggle-hide-btn">▾</button>
+    </div>
+    <div class="filter-group" id="depFilterGroup">
+        <span class="filter-title">🔗 依赖</span>
+        <label><input type="checkbox" checked value="strong"> 强</label>
+        <label><input type="checkbox" checked value="weak"> 弱</label>
+        <label><input type="checkbox" checked value="conflict"> 冲突</label>
+    </div>
+    <div class="filter-group" id="typeFilterGroup">
+        <span class="filter-title">📦 类型</span>
+        <!-- 由 JS 动态填充 -->
+    </div>
+</div>
+
+<!-- 画布 -->
+<div class="canvas-wrapper" id="canvasWrapper">
+    <div class="loading" id="loading">⏳ 绘制中…</div>
+    <svg id="graphSvg"></svg>
+    <div class="legend">
+        <div class="legend-item"><span class="legend-line strong"></span> 强依赖</div>
+        <div class="legend-item"><span class="legend-line weak"></span> 弱依赖</div>
+        <div class="legend-item"><span class="legend-line conflict"></span> 冲突</div>
+        <div class="legend-item" style="margin-top:4px;font-size:0.65rem;color:var(--muted);">拖拽移动 · 滚轮缩放</div>
+    </div>
+</div>
+
+<script>
+    (function() {
+        // ----- 引用 DOM -----
+        const fileInput = document.getElementById('fileInput');
+        const uploadBtn = document.getElementById('uploadBtn');
+        const pasteBtn = document.getElementById('pasteBtn');
+        const drawBtn = document.getElementById('drawBtn');
+        const toggleInputBtn = document.getElementById('toggleInputBtn');
+        const yamlInput = document.getElementById('yamlInput');
+        const inputPanel = document.getElementById('inputPanel');
+        const canvasWrapper = document.getElementById('canvasWrapper');
+        const svg = d3.select('#graphSvg');
+        const loading = document.getElementById('loading');
+        const stats = document.getElementById('stats');
+        const lineCount = document.getElementById('lineCount');
+
+        const hideInput = document.getElementById('hideInput');
+        const applyHideBtn = document.getElementById('applyHideBtn');
+        const clearHideBtn = document.getElementById('clearHideBtn');
+        const toggleHidePanelBtn = document.getElementById('toggleHidePanelBtn');
+        const depFilterGroup = document.getElementById('depFilterGroup');
+        const typeFilterGroup = document.getElementById('typeFilterGroup');
+        const themeToggle = document.getElementById('themeToggle');
+
+        // ----- 状态 -----
+        let rawUnits = null;
+        let hideList = [];
+        let depFilters = { strong: true, weak: true, conflict: true };
+        let typeFilters = {};
+        let isInputPanelCollapsed = true;   // 默认折叠
+        let isHidePanelCollapsed = false;
+
+        // ----- 主题管理 -----
+        function setTheme(theme) {
+            document.documentElement.setAttribute('data-theme', theme);
+            localStorage.setItem('theme', theme);
+            themeToggle.textContent = theme === 'dark' ? '☀️ 亮色' : '🌙 暗色';
+            // 如果已有数据，重新绘制以更新颜色
+            if (rawUnits) {
+                // 显示加载动画（可选）
+                loading.classList.add('active');
+                // 使用 setTimeout 确保 DOM 更新后再绘制
+                setTimeout(() => {
+                    applyAllFilters();
+                }, 50);
+            }
+        }
+
+        function toggleTheme() {
+            const current = document.documentElement.getAttribute('data-theme');
+            setTheme(current === 'dark' ? 'light' : 'dark');
+        }
+
+        function getSystemTheme() {
+            return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
+
+        function initTheme() {
+            const stored = localStorage.getItem('theme');
+            if (stored) {
+                setTheme(stored);
+            } else {
+                setTheme(getSystemTheme());
+            }
+        }
+
+        // 监听系统主题变化
+        const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+        mediaQuery.addEventListener('change', (e) => {
+            if (!localStorage.getItem('theme')) {
+                setTheme(e.matches ? 'dark' : 'light');
+            }
+        });
+
+        themeToggle.addEventListener('click', toggleTheme);
+
+        // ----- 辅助函数 -----
+        function updateLineCount() {
+            lineCount.textContent = yamlInput.value.split('\n').length + ' 行';
+        }
+        yamlInput.addEventListener('input', updateLineCount);
+
+        // 切换输入面板（默认折叠）
+        toggleInputBtn.addEventListener('click', () => {
+            isInputPanelCollapsed = !isInputPanelCollapsed;
+            inputPanel.classList.toggle('collapsed', isInputPanelCollapsed);
+            toggleInputBtn.textContent = isInputPanelCollapsed ? '▸ 输入面板' : '▾ 输入面板';
+            window.dispatchEvent(new Event('resize'));
+        });
+        toggleHidePanelBtn.addEventListener('click', () => {
+            isHidePanelCollapsed = !isHidePanelCollapsed;
+            hideInput.style.display = isHidePanelCollapsed ? 'none' : '';
+            toggleHidePanelBtn.textContent = isHidePanelCollapsed ? '▸' : '▾';
+        });
+
+        // 上传文件
+        uploadBtn.addEventListener('click', () => fileInput.click());
+        fileInput.addEventListener('change', function(e) {
+            const file = this.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+                yamlInput.value = ev.target.result;
+                updateLineCount();
+                drawBtn.click();
+            };
+            reader.readAsText(file);
+            this.value = '';
+        });
+
+        // 粘贴
+        pasteBtn.addEventListener('click', () => {
+            yamlInput.focus();
+            if (navigator.clipboard && navigator.clipboard.readText) {
+                navigator.clipboard.readText().then(text => {
+                    yamlInput.value = text;
+                    updateLineCount();
+                    drawBtn.click();
+                }).catch(() => {});
+            } else {
+                alert('请手动粘贴文本到输入框');
+            }
+        });
+
+        // ----- 解析与构建图（支持过滤） -----
+        function parseYaml(text) {
+            const cleaned = text.replace(/\x1b\[[0-9;]*m/g, '');
+            let docs;
+            try {
+                docs = jsyaml.loadAll(cleaned);
+            } catch (e) {
+                alert('YAML 解析失败：' + e.message);
+                return null;
+            }
+            const units = {};
+            docs.forEach(doc => {
+                if (typeof doc === 'object' && doc !== null) {
+                    Object.assign(units, doc);
+                }
+            });
+            return units;
+        }
+
+        function buildGraph(units, hideSet, depFilter, typeFilter) {
+            const nodesMap = {};
+            const links = [];
+            const orderGraph = {};
+
+            // 收集节点（根据类型过滤和隐藏）
+            for (const [id, data] of Object.entries(units)) {
+                if (hideSet.has(id)) continue;
+                if (typeof data !== 'object' || data === null) continue;
+                const kind = data.kind || 'unknown';
+                if (!typeFilter[kind]) continue;
+                const desc = data.unit?.description || data.description || id;
+                nodesMap[id] = {
+                    id: id,
+                    label: id.length > 30 ? id.substring(0,28)+'…' : id,
+                    kind: kind,
+                    description: desc,
+                    level: 0,
+                    targetY: 0,
+                };
+            }
+
+            function addOrderEdge(from, to) {
+                if (!nodesMap[from] || !nodesMap[to]) return;
+                if (!orderGraph[from]) orderGraph[from] = { out: [], in: 0 };
+                if (!orderGraph[to]) orderGraph[to] = { out: [], in: 0 };
+                if (!orderGraph[from].out.includes(to)) {
+                    orderGraph[from].out.push(to);
+                    orderGraph[to].in += 1;
+                }
+            }
+
+            for (const [id, data] of Object.entries(units)) {
+                if (hideSet.has(id)) continue;
+                if (!nodesMap[id]) continue;
+                const unit = data.unit || {};
+                const install = data.install || {};
+
+                const after = unit.after || [];
+                const before = unit.before || [];
+                for (const target of after) { if (nodesMap[target]) addOrderEdge(target, id); }
+                for (const target of before) { if (nodesMap[target]) addOrderEdge(id, target); }
+
+                const strong = (unit.requires || []).concat(unit.binds_to || []).concat(unit.requisite || []);
+                const weak = (unit.wants || []).concat(unit.part_of || []).concat(unit.upholds || []);
+                const conflicts = unit.conflicts || [];
+                const wantedBy = install.wanted_by || [];
+                const requiredBy = install.required_by || [];
+
+                const addLink = (target, type) => {
+                    if (!depFilter[type]) return;
+                    if (!nodesMap[target]) return;
+                    if (links.some(l => l.source === id && l.target === target && l.type === type)) return;
+                    links.push({ source: id, target: target, type: type });
+                };
+
+                for (const t of strong) addLink(t, 'strong');
+                for (const t of weak) addLink(t, 'weak');
+                for (const t of conflicts) addLink(t, 'conflict');
+
+                for (const target of wantedBy) {
+                    if (nodesMap[target]) {
+                        if (!links.some(l => l.source === target && l.target === id && l.type === 'weak')) {
+                            links.push({ source: target, target: id, type: 'weak' });
+                        }
+                    }
+                }
+                for (const target of requiredBy) {
+                    if (nodesMap[target]) {
+                        if (!links.some(l => l.source === target && l.target === id && l.type === 'strong')) {
+                            links.push({ source: target, target: id, type: 'strong' });
+                        }
+                    }
+                }
+            }
+
+            // 层级计算
+            const orderCopy = JSON.parse(JSON.stringify(orderGraph));
+            const queue = [];
+            const nodeIds = Object.keys(nodesMap);
+            for (const id of nodeIds) {
+                if (!orderCopy[id]) orderCopy[id] = { out: [], in: 0 };
+                if (orderCopy[id].in === 0) queue.push(id);
+            }
+            const levels = {};
+            let level = 0;
+            let visited = new Set();
+            while (queue.length > 0) {
+                const size = queue.length;
+                for (let i = 0; i < size; i++) {
+                    const id = queue.shift();
+                    if (visited.has(id)) continue;
+                    visited.add(id);
+                    levels[id] = level;
+                    const neighbors = orderCopy[id]?.out || [];
+                    for (const nb of neighbors) {
+                        if (orderCopy[nb]) {
+                            orderCopy[nb].in -= 1;
+                            if (orderCopy[nb].in === 0 && !visited.has(nb)) {
+                                queue.push(nb);
+                            }
+                        }
+                    }
+                }
+                level++;
+            }
+            for (const id of nodeIds) {
+                if (!(id in levels)) levels[id] = level;
+            }
+            const maxLevel = Math.max(...Object.values(levels), 0);
+            for (const id of nodeIds) {
+                nodesMap[id].level = levels[id] || 0;
+                nodesMap[id].targetY = (levels[id] || 0) * 120;
+            }
+
+            const nodes = Object.values(nodesMap);
+            const strongLinks = links.filter(l => l.type === 'strong');
+            const weakLinks = links.filter(l => l.type === 'weak');
+            const conflictLinks = links.filter(l => l.type === 'conflict');
+            stats.textContent = `节点: ${nodes.length}  边: ${links.length} (强 ${strongLinks.length}, 弱 ${weakLinks.length}, 冲突 ${conflictLinks.length})`;
+
+            return { nodes, links };
+        }
+
+        // ----- 绘图 -----
+        function drawGraph(graphData) {
+            if (!graphData || graphData.nodes.length === 0) {
+                alert('没有节点可显示，请检查过滤条件。');
+                return;
+            }
+
+            loading.classList.add('active');
+            svg.selectAll('*').remove();
+
+            const width = canvasWrapper.clientWidth || 800;
+            const height = canvasWrapper.clientHeight || 600;
+            svg.attr('viewBox', `0 0 ${width} ${height}`)
+               .style('width', '100%')
+               .style('height', '100%');
+
+            // 箭头定义
+            const defs = svg.append('defs');
+            ['strong', 'weak', 'conflict'].forEach(type => {
+                defs.append('marker')
+                    .attr('id', `arrow-${type}`)
+                    .attr('viewBox', '0 -4 8 8')
+                    .attr('refX', 10)
+                    .attr('refY', 0)
+                    .attr('markerWidth', 6)
+                    .attr('markerHeight', 6)
+                    .attr('orient', 'auto')
+                    .append('path')
+                    .attr('d', 'M0,-4 L8,0 L0,4')
+                    .attr('class', `arrow ${type}`);
+            });
+
+            const container = svg.append('g');
+
+            const nodes = graphData.nodes.map(n => ({
+                ...n,
+                x: width / 2 + (Math.random() - 0.5) * 200,
+                y: n.targetY + (Math.random() - 0.5) * 30,
+            }));
+
+            const links = graphData.links.map(l => ({
+                source: l.source,
+                target: l.target,
+                type: l.type,
+            }));
+
+            const simulation = d3.forceSimulation(nodes)
+                .force('charge', d3.forceManyBody().strength(-300))
+                .force('center', d3.forceCenter(width/2, height/2))
+                .force('link', d3.forceLink(links)
+                    .id(d => d.id)
+                    .distance(160)
+                    .strength(0.8)
+                )
+                .force('y', (alpha) => {
+                    const strength = 0.05;
+                    for (const node of nodes) {
+                        const dy = node.targetY - node.y;
+                        node.vy += dy * strength * alpha;
+                    }
+                })
+                .alphaDecay(0.02)
+                .velocityDecay(0.4);
+
+            // 边
+            const linkGroup = container.append('g')
+                .selectAll('g.link-group')
+                .data(links)
+                .enter().append('g')
+                .attr('class', d => `link-group ${d.type}`);
+
+            const linkPath = linkGroup.append('line')
+                .attr('class', d => `link ${d.type}`)
+                .attr('marker-end', d => `url(#arrow-${d.type})`);
+
+            // 节点
+            const nodeGroup = container.append('g')
+                .selectAll('g.node')
+                .data(nodes)
+                .enter().append('g')
+                .attr('class', d => `node kind-${d.kind}`) // 添加类型类
+                .call(d3.drag()
+                    .on('start', dragstarted)
+                    .on('drag', dragged)
+                    .on('end', dragended)
+                );
+
+            nodeGroup.append('circle')
+                .attr('r', 10);
+
+            nodeGroup.append('title')
+                .text(d => `${d.id}\n类型: ${d.kind}\n描述: ${d.description || ''}\n层级: ${d.level}`);
+
+            nodeGroup.append('text')
+                .attr('dy', 25)
+                .text(d => d.label)
+                .style('font-size', '9px')
+                .style('text-anchor', 'middle')
+                .style('pointer-events', 'none');
+
+            // 双击隐藏
+            nodeGroup.on('dblclick', function(event, d) {
+                const currentHide = hideInput.value.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+                if (!currentHide.includes(d.id)) {
+                    currentHide.push(d.id);
+                    hideInput.value = currentHide.join('\n');
+                    applyHide();
+                }
+            });
+
+            simulation.on('tick', () => {
+                linkPath
+                    .attr('x1', d => d.source.x)
+                    .attr('y1', d => d.source.y)
+                    .attr('x2', d => d.target.x)
+                    .attr('y2', d => d.target.y);
+                nodeGroup.attr('transform', d => `translate(${d.x},${d.y})`);
+            });
+
+            function dragstarted(event, d) {
+                if (!event.active) simulation.alphaTarget(0.3).restart();
+                d.fx = d.x; d.fy = d.y;
+            }
+            function dragged(event, d) {
+                d.fx = event.x; d.fy = event.y;
+            }
+            function dragended(event, d) {
+                if (!event.active) simulation.alphaTarget(0);
+                d.fx = null; d.fy = null;
+            }
+
+            const zoomBehavior = d3.zoom()
+                .extent([[0,0], [width, height]])
+                .scaleExtent([0.2, 4])
+                .on('zoom', (event) => {
+                    container.attr('transform', event.transform);
+                });
+            svg.call(zoomBehavior);
+
+            window._simulation = simulation;
+
+            // 自适应
+            const resizeObserver = new ResizeObserver(() => {
+                const w = canvasWrapper.clientWidth;
+                const h = canvasWrapper.clientHeight;
+                svg.attr('viewBox', `0 0 ${w} ${h}`);
+                simulation.force('center', d3.forceCenter(w/2, h/2));
+                simulation.alpha(0.3).restart();
+            });
+            resizeObserver.observe(canvasWrapper);
+            window._resizeObserver = resizeObserver;
+
+            setTimeout(() => {
+                const w = canvasWrapper.clientWidth;
+                const h = canvasWrapper.clientHeight;
+                svg.attr('viewBox', `0 0 ${w} ${h}`);
+                simulation.force('center', d3.forceCenter(w/2, h/2));
+                simulation.alpha(0.2).restart();
+            }, 100);
+
+            loading.classList.remove('active');
+        }
+
+        function clearGraph() {
+            svg.selectAll('*').remove();
+            if (window._simulation) { window._simulation.stop(); window._simulation = null; }
+            if (window._resizeObserver) { window._resizeObserver.disconnect(); window._resizeObserver = null; }
+            stats.textContent = '';
+        }
+
+        // ----- 核心渲染 -----
+        function render() {
+            const text = yamlInput.value.trim();
+            if (!text) { alert('请输入或上传 systemd dump 内容。'); return; }
+
+            const units = parseYaml(text);
+            if (!units) return;
+            rawUnits = units;
+
+            // 动态生成类型复选框
+            const kinds = new Set();
+            for (const [id, data] of Object.entries(units)) {
+                if (data && data.kind) kinds.add(data.kind);
+            }
+            ['service','target','mount','slice','socket','timer','automount','path','scope','device'].forEach(k => kinds.add(k));
+            const sortedKinds = Array.from(kinds).sort();
+            let changed = false;
+            for (const k of sortedKinds) {
+                if (!(k in typeFilters)) { typeFilters[k] = true; changed = true; }
+            }
+            for (const k of Object.keys(typeFilters)) {
+                if (!sortedKinds.includes(k)) { delete typeFilters[k]; changed = true; }
+            }
+
+            if (changed) {
+                typeFilterGroup.innerHTML = `<span class="filter-title">📦 类型</span>`;
+                for (const k of sortedKinds) {
+                    const label = document.createElement('label');
+                    const cb = document.createElement('input');
+                    cb.type = 'checkbox';
+                    cb.checked = typeFilters[k] !== false;
+                    cb.value = k;
+                    cb.addEventListener('change', () => {
+                        typeFilters[k] = cb.checked;
+                        if (rawUnits) applyAllFilters();
+                    });
+                    label.appendChild(cb);
+                    label.append(k);
+                    typeFilterGroup.appendChild(label);
+                }
+            }
+
+            applyAllFilters();
+        }
+
+        function applyAllFilters() {
+            if (!rawUnits) return;
+            const hideSet = new Set(hideList);
+            const depFilter = {
+                strong: depFilters.strong !== false,
+                weak: depFilters.weak !== false,
+                conflict: depFilters.conflict !== false,
+            };
+            const typeFilter = typeFilters;
+            const graphData = buildGraph(rawUnits, hideSet, depFilter, typeFilter);
+            if (!graphData) return;
+            clearGraph();
+            drawGraph(graphData);
+        }
+
+        // 隐藏面板操作
+        function applyHide() {
+            const raw = hideInput.value;
+            const names = raw.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+            hideList = names;
+            if (rawUnits) applyAllFilters();
+        }
+        function clearHide() {
+            hideInput.value = '';
+            hideList = [];
+            if (rawUnits) applyAllFilters();
+        }
+        applyHideBtn.addEventListener('click', applyHide);
+        clearHideBtn.addEventListener('click', clearHide);
+
+        // 依赖过滤
+        depFilterGroup.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+            cb.addEventListener('change', () => {
+                depFilters[cb.value] = cb.checked;
+                if (rawUnits) applyAllFilters();
+            });
+        });
+
+        // 快捷键
+        yamlInput.addEventListener('keydown', (e) => {
+            if (e.ctrlKey && e.key === 'Enter') drawBtn.click();
+        });
+
+        // 拖拽上传
+        document.addEventListener('dragover', (e) => e.preventDefault());
+        document.addEventListener('drop', (e) => {
+            e.preventDefault();
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                const file = files[0];
+                const reader = new FileReader();
+                reader.onload = (ev) => {
+                    yamlInput.value = ev.target.result;
+                    updateLineCount();
+                    drawBtn.click();
+                };
+                reader.readAsText(file);
+            }
+        });
+
+        drawBtn.addEventListener('click', render);
+
+        // 初始化
+        initTheme();
+        updateLineCount();
+        console.log('systemd 依赖图工具已加载。');
+    })();
+</script>
+</body>
+</html>
