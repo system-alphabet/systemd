@@ -40,3 +40,4 @@ __pycache__/
 .envrc
 .direnv/
 a.out
+/sysroot/
