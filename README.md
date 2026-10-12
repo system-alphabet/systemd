@@ -16,6 +16,8 @@ System and Service Manager — **SystemA fork with bionic support**
 - `fork-utils/check-hardcoded-paths.py` — Scans source and test files for hardcoded paths.
 - `fork-utils/replace-hardcoded-paths.py` — Bulk-replaces hardcoded paths with compile-time macros.
 - `fork-utils/generate-dbus-api.py` — Generate D-Bus API documentation (YAML) from systemd's --bus-introspect output.
+- `fork-utils/android-cross.ini` — Meson cross file for building for Android (aarch64) with the NDK.
+- `fork-utils/bootstrap-android-sysroot.sh` — Builds the sysroot dependencies bionic lacks (libucontext, libintl).
 
 [![(upstream) OBS Packages Status](https://build.opensuse.org/projects/system:systemd/packages/systemd/badge.svg?type=default)](https://build.opensuse.org/project/show/system:systemd)<br/>
 [![(upstream) Semaphore CI 2.0 Build Status](https://the-real-systemd.semaphoreci.com/badges/systemd/branches/main.svg?style=shields)](https://the-real-systemd.semaphoreci.com/projects/systemd)<br/>
@@ -51,6 +53,22 @@ meson setup build \
   -Dsysconfdir=$PREFIX/etc
 meson compile -C build
 ```
+
+### Cross build (Android/aarch64)
+
+Bionic provides neither ucontext APIs nor gettext/libintl. Populate the
+(gitignored) `sysroot/` directory with them once, then build with the NDK
+cross file:
+
+```text
+fork-utils/bootstrap-android-sysroot.sh
+meson setup build-android --cross-file fork-utils/android-cross.ini -Dlibc=bionic
+meson compile -C build-android
+```
+
+Requires the Android NDK in `/opt/android-ndk` (override with `ANDROID_NDK=`,
+API level with `ANDROID_API=`), plus git, curl, tar, meson, ninja, python3 and
+GNU make. Re-run the bootstrap script whenever `sysroot/` is missing.
 
 ## Details
 
