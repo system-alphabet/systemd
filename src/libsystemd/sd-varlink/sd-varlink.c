@@ -1164,8 +1164,12 @@ static int varlink_dispatch_fiber(sd_varlink *v, const char *method, sd_varlink_
                 .callback = callback,
         };
 
-        _cleanup_(sd_future_unrefp) sd_future *f = NULL;
-        r = sd_fiber_new(v->server->event, method, varlink_fiber_entry, d, varlink_fiber_data_destroy, &f);
+        _cleanup_(sd_future_cancel_unrefp) sd_future *f = NULL;
+        r = sd_fiber_new(v->server->event, method, varlink_fiber_entry, d, &f);
+        if (r < 0)
+                return r;
+
+        r = sd_fiber_set_destroy_callback(f, varlink_fiber_data_destroy);
         if (r < 0)
                 return r;
 
@@ -1189,6 +1193,8 @@ static int varlink_dispatch_fiber(sd_varlink *v, const char *method, sd_varlink_
         if (r < 0)
                 return r;
 
+        /* Floating self-ref keeps the fiber alive; release our local ref without cancelling. */
+        f = sd_future_unref(f);
         return 0;
 }
 
@@ -3748,8 +3754,8 @@ _public_ int sd_varlink_server_listen_name(sd_varlink_server *s, const char *nam
         /* Adds all passed fds marked as "name" to our varlink server. These fds can either refer to a
          * listening socket or to a connection socket.
          *
-         * See https://varlink.org/#activation for the environment variables this is backed by and the
-         * recommended "varlink" identifier in $LISTEN_FDNAMES. */
+         * See https://uapi-group.org/specifications/specs/varlink/#socket-activation for the environment
+         * variables this is backed by and the recommended "varlink" identifier in $LISTEN_FDNAMES. */
 
         m = sd_listen_fds_with_names(/* unset_environment= */ false, &names);
         if (m < 0)
@@ -4269,16 +4275,17 @@ _public_ int sd_varlink_error_to_errno(const char *error, sd_json_variant *param
                 const char *error;
                 int value;
         } table[] = {
-                { SD_VARLINK_ERROR_DISCONNECTED,           -ECONNRESET    },
-                { SD_VARLINK_ERROR_TIMEOUT,                -ETIMEDOUT     },
-                { SD_VARLINK_ERROR_PROTOCOL,               -EPROTO        },
-                { SD_VARLINK_ERROR_INTERFACE_NOT_FOUND,    -EADDRNOTAVAIL },
-                { SD_VARLINK_ERROR_METHOD_NOT_FOUND,       -ENXIO         },
-                { SD_VARLINK_ERROR_METHOD_NOT_IMPLEMENTED, -ENOTTY        },
-                { SD_VARLINK_ERROR_INVALID_PARAMETER,      -EINVAL        },
-                { SD_VARLINK_ERROR_PERMISSION_DENIED,      -EACCES        },
-                { SD_VARLINK_ERROR_EXPECTED_MORE,          -EBADE         },
-                { SD_VARLINK_ERROR_EXPECTED_UPGRADE,       -EPROTOTYPE    },
+                { SD_VARLINK_ERROR_DISCONNECTED,            -ECONNRESET    },
+                { SD_VARLINK_ERROR_TIMEOUT,                 -ETIMEDOUT     },
+                { SD_VARLINK_ERROR_PROTOCOL,                -EPROTO        },
+                { SD_VARLINK_ERROR_OPERATION_NOT_SUPPORTED, -EOPNOTSUPP    },
+                { SD_VARLINK_ERROR_INTERFACE_NOT_FOUND,     -EADDRNOTAVAIL },
+                { SD_VARLINK_ERROR_METHOD_NOT_FOUND,        -ENXIO         },
+                { SD_VARLINK_ERROR_METHOD_NOT_IMPLEMENTED,  -ENOTTY        },
+                { SD_VARLINK_ERROR_INVALID_PARAMETER,       -EINVAL        },
+                { SD_VARLINK_ERROR_PERMISSION_DENIED,       -EACCES        },
+                { SD_VARLINK_ERROR_EXPECTED_MORE,           -EBADE         },
+                { SD_VARLINK_ERROR_EXPECTED_UPGRADE,        -EPROTOTYPE    },
         };
 
         int r;

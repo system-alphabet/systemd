@@ -83,14 +83,25 @@ DEFAULT_CONFIG_FILE = 'ukify.conf'
 
 # https://datatracker.ietf.org/doc/html/rfc5280 ub-common-name; bytes, not chars
 COMMON_NAME_MAX_LEN = 64
+INITRD_PCR_POLICY: tuple[list[str], str] = (['enter-initrd'], 'initrd')
+
+
+def terminal_is_dumb() -> bool:
+    return (
+        not sys.stdout.isatty()
+        or not sys.stderr.isatty()
+        or os.getenv('TERM', '') == 'dumb'
+        or bool(os.getenv('NO_COLOR'))
+    )
 
 
 class Style:
-    bold = '\033[0;1;39m' if sys.stderr.isatty() else ''
-    gray = '\033[0;38;5;245m' if sys.stderr.isatty() else ''
-    red = '\033[31;1m' if sys.stderr.isatty() else ''
-    yellow = '\033[33;1m' if sys.stderr.isatty() else ''
-    reset = '\033[0m' if sys.stderr.isatty() else ''
+    bold = '\033[0;1;39m' if not terminal_is_dumb() else ''
+    gray = '\033[0;38;5;245m' if not terminal_is_dumb() else ''
+    red = '\033[31;1m' if not terminal_is_dumb() else ''
+    yellow = '\033[33;1m' if not terminal_is_dumb() else ''
+    blue = '\033[34;1m' if not terminal_is_dumb() else ''
+    reset = '\033[0m' if not terminal_is_dumb() else ''
 
 
 def guess_efi_arch() -> str:
@@ -471,7 +482,7 @@ class Section:
 
     @classmethod
     def parse_output(cls, s: str) -> 'Section':
-        if not (m := re.match(r'([a-zA-Z0-9_.]+):(text|binary)(?:@(.+))?', s)):
+        if not (m := re.fullmatch(r'([a-zA-Z0-9_.]+):(text|binary)(?:@(.+))?', s)):
             raise ValueError(f'Cannot parse section spec: {s!r}')
 
         name, ttype, out = m.groups()
@@ -640,7 +651,13 @@ class SystemdSbSign(SignTool):
 
 
 def parse_banks(s: str) -> list[str]:
-    banks = re.split(r',|\s+', s)
+    s = s.strip()
+    if not s:
+        return []
+    # Allow a single trailing comma, but reject any other empty entry.
+    banks = re.split(r'\s*,\s*|\s+', s.removesuffix(',').rstrip())
+    if '' in banks:
+        raise argparse.ArgumentTypeError(f'Empty entry in PCR bank list {s!r}')
     # TODO: do some sanity checking here
     return banks
 
@@ -657,7 +674,8 @@ KNOWN_PHASES = (
 
 def parse_phase_paths(s: str) -> list[str]:
     # Split on commas or whitespace here. Commas might be hard to parse visually.
-    paths = re.split(r',|\s+', s)
+    # Allow a single trailing comma. Other empty entries are rejected below as unknown phases.
+    paths = re.split(r'\s*,\s*|\s+', s.strip().removesuffix(',').rstrip())
 
     for path in paths:
         for phase in path.split(':'):
@@ -748,6 +766,25 @@ def combine_signatures(pcrsigs: list[dict[str, str]]) -> str:
     return json.dumps(combined)
 
 
+def apply_pcr_signatures(pcrsig: dict[str, Any], signatures: dict[str, Any]) -> None:
+    for (bank, policies), (input_bank, input_policies) in itertools.product(
+        pcrsig.items(), signatures.items()
+    ):
+        if input_bank != bank:
+            continue
+        for policy, input_policy in itertools.product(policies, input_policies):
+            if 'tbs' in policy and 'tbs' in input_policy:
+                match = policy['tbs'] == input_policy['tbs']
+            else:
+                match = (policy['pol'], policy.get('ref')) == (
+                    input_policy['pol'],
+                    input_policy.get('ref'),
+                )
+
+            if match:
+                policy['sig'] = input_policy['sig']
+
+
 def key_path_groups(
     opts: UkifyConfig,
     include_extra: bool,
@@ -771,14 +808,13 @@ def key_path_groups(
     )
 
     # When requested, emit an extra signing group that reuses the first PCR signing key to produce
-    # a signed PCR policyy that can only be used from the initrd.
+    # a signed PCR policy that can only be used from the initrd.
     if opts.sign_initrd_pcrs and include_extra:
         yield (
             opts.pcr_private_keys[0],
             pub_keys[0] if pub_keys else None,
             certs[0] if certs else None,
-            ['enter-initrd'],
-            'initrd',
+            *INITRD_PCR_POLICY,
         )
 
 
@@ -839,39 +875,47 @@ def call_systemd_measure(uki: UKI, opts: UkifyConfig, profile_start: int = 0) ->
             if dtbauto is not None:
                 to_measure[dtbauto.name] = dtbauto
 
-            pp_groups = opts.phase_path_groups or []
-
-            cmd = [
-                measure_tool,
-                'calculate' if opts.measure else 'policy-digest',
-                '--json',
-                opts.json,
-                *(f'--{s.name.removeprefix(".")}={s.content}' for s in to_measure.values()),
-                *(f'--bank={bank}' for bank in banks),
-                # For measurement, the keys are not relevant, so we can lump all the phase paths
-                # into one call to systemd-measure calculate.
-                *(f'--phase={phase_path}' for phase_path in itertools.chain.from_iterable(pp_groups)),
+            policy_groups: list[tuple[list[str], str]] = [
+                (list(itertools.chain.from_iterable(opts.phase_path_groups or [])), ''),
             ]
+            if opts.policy_digest and opts.sign_initrd_pcrs:
+                policy_groups += [INITRD_PCR_POLICY]
 
-            # The JSON object will be used for offline signing, include the public key
-            # so that the fingerprint is included too. In case a certificate is passed, use the
-            # right parameter so that systemd-measure can extract the public key from it.
-            if opts.policy_digest:
-                if opts.pcr_public_keys:
-                    cmd += ['--public-key', opts.pcr_public_keys[0]]
-                elif opts.pcr_certificates:
-                    cmd += ['--certificate', opts.pcr_certificates[0]]
-                    if opts.certificate_provider:
-                        cmd += ['--certificate-source', f'provider:{opts.certificate_provider}']
+            for phase_paths, policyref in policy_groups:
+                cmd = [
+                    measure_tool,
+                    'calculate' if opts.measure else 'policy-digest',
+                    '--json',
+                    opts.json,
+                    *(f'--{s.name.removeprefix(".")}={s.content}' for s in to_measure.values()),
+                    *(f'--bank={bank}' for bank in banks),
+                    # For measurement, the keys are not relevant, so we can lump all the phase paths
+                    # into one call to systemd-measure calculate.
+                    *(f'--phase={phase_path}' for phase_path in phase_paths),
+                ]
 
-            print('+', shell_join(cmd), file=sys.stderr)
-            output = subprocess.check_output(cmd, text=True)  # type: ignore
+                # The JSON object will be used for offline signing, include the public key
+                # so that the fingerprint is included too. In case a certificate is passed, use the
+                # right parameter so that systemd-measure can extract the public key from it.
+                if opts.policy_digest:
+                    if opts.pcr_public_keys:
+                        cmd += [f'--public-key={opts.pcr_public_keys[0]}']
+                    elif opts.pcr_certificates:
+                        cmd += [f'--certificate={opts.pcr_certificates[0]}']
+                        if opts.certificate_provider:
+                            cmd += [f'--certificate-source=provider:{opts.certificate_provider}']
 
-            if opts.policy_digest:
-                pcrsig = json.loads(output)
-                pcrsigs += [pcrsig]
-            else:
-                print(output)
+                    if policyref:
+                        cmd += [f'--policyref={policyref}']
+
+                print('+', shell_join(cmd), file=sys.stderr)
+                output = subprocess.check_output(cmd, text=True)  # type: ignore
+
+                if opts.policy_digest:
+                    pcrsig = json.loads(output)
+                    pcrsigs += [pcrsig]
+                else:
+                    print(output)
 
         if opts.policy_digest:
             combined = combine_signatures(pcrsigs)
@@ -1128,14 +1172,7 @@ def pe_add_sections(opts: UkifyConfig, uki: UKI, output: str) -> None:
                     .rstrip(b'\x00')
                     .decode()
                 )
-                for (bank, sigs), (input_bank, input_sigs) in itertools.product(
-                    j.items(), signatures.items()
-                ):
-                    if input_bank != bank:
-                        continue
-                    for sig, input_sig in itertools.product(sigs, input_sigs):
-                        if sig['pol'] == input_sig['pol']:
-                            sig['sig'] = input_sig['sig']
+                apply_pcr_signatures(j, signatures)
 
                 encoded = json.dumps(j).encode()
                 if len(encoded) > section.SizeOfRawData:
@@ -1206,8 +1243,8 @@ NULL_DEVICE = b'\0' * DEVICE_STRUCT_SIZE
 DEVICE_TYPE_DEVICETREE = 1
 DEVICE_TYPE_UEFI_FW = 2
 
-# Keep in sync with efifirmware.h
-FWHEADERMAGIC = 'feeddead'
+# Keep in sync with src/boot/efi-firmware.h
+FWHEADERMAGIC = 0xFEEDDEAD
 EFIFW_HEADER_SIZE = 4 + 4 + 4 + 4
 
 
@@ -1313,27 +1350,16 @@ def parse_efifw_dir(path: Path) -> bytes:
     for fw in path.iterdir():
         payload_blob += fw.read_bytes()
 
-    payload_len = len(payload_blob)
-    if payload_len == 0:
+    if len(payload_blob) == 0:
         raise ValueError(f'{fw} is a zero byte file!')
 
-    dirname = path.parts[-1]
     # firmware id is the name of the directory the firmware bundle is in,
     # terminated by NULL.
-    fwid = b'' + dirname.encode() + b'\0'
-    fwid_len = len(fwid)
-    magic = bytes.fromhex(FWHEADERMAGIC)
+    fwid = path.absolute().name.encode() + b'\0'
 
-    efifw_header_blob = b''
-    efifw_header_blob += struct.pack('<p', magic)
-    efifw_header_blob += struct.pack('<I', EFIFW_HEADER_SIZE)
-    efifw_header_blob += struct.pack('<I', fwid_len)
-    efifw_header_blob += struct.pack('<I', payload_len)
+    efifw_header_blob = struct.pack('<IIII', FWHEADERMAGIC, EFIFW_HEADER_SIZE, len(fwid), len(payload_blob))
 
-    efifw_blob = b''
-    efifw_blob += efifw_header_blob + fwid + payload_blob
-
-    return efifw_blob
+    return efifw_header_blob + fwid + payload_blob
 
 
 STUB_SBAT = '''\
@@ -1915,7 +1941,7 @@ class ConfigItem:
             return True
         if s_l in {'0', 'false', 'no', 'n', 'f', 'off'}:
             return False
-        raise ValueError('f"Invalid boolean literal: {s!r}')
+        raise ValueError(f'Invalid boolean literal: {s!r}')
 
     # arguments for argparse.ArgumentParser.add_argument()
     name: Union[str, tuple[str, str]]
@@ -2443,13 +2469,13 @@ def create_parser() -> argparse.ArgumentParser:
         description='Build and sign Unified Kernel Images',
         usage='\n  '
         + textwrap.dedent('''\
-          ukify {b}build{e} [--linux=LINUX] [--initrd=INITRD] [options…]
-            ukify {b}genkey{e} [options…]
-            ukify {b}inspect{e} FILE… [options…]
+          %(prog)s {b}build{e} [--linux=LINUX] [--initrd=INITRD] [options…]
+            %(prog)s {b}genkey{e} [options…]
+            %(prog)s {b}inspect{e} FILE… [options…]
         ''').format(b=Style.bold, e=Style.reset),
         allow_abbrev=False,
         add_help=False,
-        epilog='\n  '.join(('config file:', *config_example())),
+        epilog='\n  '.join((f'{Style.blue}config file:{Style.reset}', *config_example())),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
@@ -2528,8 +2554,8 @@ def finalize_options(opts: argparse.Namespace) -> None:
         raise ValueError('--phases= specifications must match --pcr-private-key=')
     if n_policyrefs is not None and n_policyrefs != n_pcr_priv:
         raise ValueError('--policyref= specifications must match --pcr-private-key=')
-    if opts.sign_initrd_pcrs and not n_pcr_priv:
-        raise ValueError('--sign-initrd-pcrs requires at least one --pcr-private-key=')
+    if opts.sign_initrd_pcrs and not (n_pcr_priv or opts.policy_digest):
+        raise ValueError('--sign-initrd-pcrs requires --pcr-private-key= or --policy-digest')
 
     opts.cmdline = resolve_at_path(opts.cmdline)
 

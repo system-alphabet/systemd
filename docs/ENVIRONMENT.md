@@ -45,6 +45,10 @@ All tools:
 * `$SYSTEMD_INVOKED_AS=name` — override argv[0] for detection of a multicall
   binary. E.g. `SYSTEMD_INVOKED_AS=systemd-udevd build/udevadm`.
 
+* `$SYSTEMD_EXPERIMENTAL=0|1` — if set to true, experimental features may be
+  used. This variable is not checked if the build was configured with
+  "-Dexperimental=disabled".
+
 * `$SYSTEMD_PROC_CMDLINE` — if set, the contents are used as the kernel command
   line instead of the actual one in `/proc/cmdline`. This is useful for
   debugging, in order to test generators and other code against specific kernel
@@ -282,6 +286,9 @@ All tools:
   If the worker process cannot finalize the event within the specified timespan,
   the worker process is killed by the manager process. Defaults to 10 seconds,
   maximum allowed is 5 hours.
+
+* `$SYSTEMD_UDEV_USE_INOTIFY=` — If true, use inotify instead of fanotify for
+  device node watches (`OPTIONS+="watch"`). Defaults to false.
 
 `udevadm` and `systemd-hwdb`:
 
@@ -734,6 +741,17 @@ SYSTEMD_HOME_DEBUG_SUFFIX=foo \
   be overridden via a correspondingly named environment variable. For example,
   to override the filesystem type for all partitions with `Type=root`, you can
   set `SYSTEMD_REPART_OVERRIDE_FSTYPE_ROOT=ext4`.
+
+`systemd-sysinstall`:
+
+* `$SYSTEMD_SYSINSTALL_PERMIT_AUTO_TARGET_LOOP` – takes a boolean. If true,
+  loopback block devices are considered as candidates when the installation
+  target device is picked automatically (i.e. when `--device-auto` is used).
+  By default, loopback devices are never picked automatically, since they are
+  hardly ever the disk an unattended installation is supposed to end up on.
+  This is primarily useful for testing purposes, where loopback devices are
+  used as stand-ins for real disks. Only honoured if `systemd-sysinstall` is
+  not invoked with elevated privileges (i.e. via `secure_getenv()`).
 
 `systemd-nspawn`, `systemd-networkd`:
 

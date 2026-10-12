@@ -40,8 +40,10 @@ udevadm_export_sources = files(
         'udev-node.c',
         'udev-rules.c',
         'udev-spawn.c',
+        'udev-synth.c',
         'udev-varlink.c',
-        'udev-watch.c',
+        'udev-watch-fanotify.c',
+        'udev-watch-inotify.c',
         'udev-worker.c',
 )
 
@@ -80,7 +82,7 @@ gperf_file = custom_target(
 keyboard_keys_from_name_inc = custom_target(
         input : gperf_file,
         output : 'keyboard-keys-from-name.inc',
-        command : [gperf,
+        command : [gperf_cmdline,
                    '-L', 'ANSI-C', '-t',
                    '-N', 'keyboard_lookup_key',
                    '-H', 'hash_key_name',
@@ -97,7 +99,7 @@ udev_link_gperf_gperf = files('net/link-config-gperf.gperf')
 link_config_gperf_c = custom_target(
         input : udev_link_gperf_gperf,
         output : 'link-config-gperf.c',
-        command : [gperf, '@INPUT@', '--output-file', '@OUTPUT@'])
+        command : [gperf_cmdline, '@INPUT@', '--output-file', '@OUTPUT@'])
 
 udevadm_export_sources += link_config_gperf_c
 generated_sources += link_config_gperf_c
@@ -145,6 +147,9 @@ udev_binaries_dict = [
                 'dependencies' : udev_dependencies,
                 'install' : get_option('link-udev-shared') ? 'yes' : 'static',
                 'install_tag' : 'udev',
+                'symlinks' : [
+                        { 'name' : 'systemd-udevd', 'install_dir' : libexecdir },
+                ],
         },
         udev_plugin_template + {
                 'name' : 'ata_id',
@@ -243,11 +248,6 @@ executables += [
                 'sources' : files('fuzz-udev-rules.c'),
         },
 ]
-
-install_symlink('systemd-udevd',
-                pointing_to : libexecdir_to_bin + 'udevadm',
-                install_dir : libexecdir,
-                install_tag : 'udev')
 
 if install_sysconfdir_samples
         install_data('udev.conf',

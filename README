@@ -60,6 +60,7 @@ REQUIREMENTS:
 
         Linux kernel ≥ 5.11 for epoll_pwait2()
                      ≥ 5.12 for idmapped mount (mount_setattr())
+                     ≥ 5.13 for fanotify with FAN_REPORT_FID on tmpfs
                      ≥ 5.14 for cgroup.kill, quotactl_fd(), and MOUNT_ATTR_NOSYMFOLLOW
 
         ⚠️ Kernel versions below 5.14 ("recommended baseline") have significant gaps
@@ -105,6 +106,11 @@ REQUIREMENTS:
         udev will fail to work with the legacy sysfs layout:
           CONFIG_SYSFS_DEPRECATED=n
 
+        Required for fanotify-backed device node watches in systemd-udevd (OPTIONS+="watch"):
+          CONFIG_FANOTIFY
+          CONFIG_SHMEM
+          CONFIG_TMPFS
+
         Legacy hotplug slows down the system and confuses udev:
           CONFIG_UEVENT_HELPER_PATH=""
 
@@ -148,7 +154,7 @@ REQUIREMENTS:
           CONFIG_CFS_BANDWIDTH
 
         Required for IPAddressDeny=, IPAddressAllow=, IPIngressFilterPath=,
-        IPEgressFilterPath= in resource control unit settings unit settings:
+        IPEgressFilterPath= in resource control unit settings:
           CONFIG_BPF
           CONFIG_BPF_SYSCALL
           CONFIG_BPF_JIT
@@ -263,8 +269,8 @@ REQUIREMENTS:
             >= 13.1.0 is required to build BPF program by using GCC
         binutils >= 2.35
         awk, sed, grep, and similar tools
-        clang,llvm >= 10 (optional, required to build BPF programs)
-                   >= 13 (optional, required to build the entire project)
+        clang, llvm >= 10 (optional, required to build BPF programs)
+                    >= 13 (optional, required to build the entire project)
 
         During runtime, you need the following additional
         dependencies:
@@ -276,8 +282,8 @@ REQUIREMENTS:
                 NOTE: If using dbus < 1.9.18, you should override the default
                 policy directory (--with-dbuspolicydir=/etc/dbus-1/system.d).
         polkit (optional)
-        gnupg >= 2.4 optional (for signature verification in: importctl,
-                               systemd-sysupdate)
+        gnupg >= 2.4 (optional, for signature verification in: importctl,
+                      systemd-sysupdate)
 
         To build in directory build/:
           meson setup build/ && ninja -C build/

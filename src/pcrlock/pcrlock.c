@@ -108,6 +108,7 @@ COMMAND(
         "Manage a TPM2 PCR lock.",
         .man_pages = "systemd-pcrlock(8)\0",
         .pager_flags = &arg_pager_flags,
+        .flags = COMMAND_EXPERIMENTAL,
 );
 
 #define PCRLOCK_SECUREBOOT_POLICY_PATH      LOCALSTATEDIR "/lib/pcrlock.d/240-secureboot-policy.pcrlock.d/generated.pcrlock"
@@ -123,6 +124,10 @@ COMMAND(
 #define PCRLOCK_ROOT_FILE_SYSTEM_PATH       LOCALSTATEDIR "/lib/pcrlock.d/830-root-file-system.pcrlock"
 #define PCRLOCK_FILE_SYSTEM_PATH_PREFIX     LOCALSTATEDIR "/lib/pcrlock.d/840-file-system-"
 #define PCRLOCK_PE_INPUT_MAX                (2U * U64_GB)
+
+/* Maximum number of retries when PCR values keep changing while we submit the policy for, or unseal, the
+ * recovery PIN */
+#define PCRLOCK_RETRY_UNSEAL_MAX            16U
 
 /* The default set of PCRs to lock to */
 #define DEFAULT_PCR_MASK                                     \
@@ -3849,6 +3854,16 @@ static int make_policy(bool force, RecoveryPinMode recovery_pin_mode) {
                                         policy_session,
                                         &old_policy.prediction,
                                         old_policy.algorithm);
+                        if (r == -EUCLEAN) {
+                                if (attempt >= PCRLOCK_RETRY_UNSEAL_MAX)
+                                        return log_error_errno(r,
+                                                               "PCR values kept changing while submitting the policy, giving up after %u attempts. "
+                                                               "Something on this system extends a PCR continuously.",
+                                                               attempt + 1);
+
+                                log_debug("Trying again (attempt %u), as PCR values changed while submitting the policy.", attempt + 1);
+                                continue;
+                        }
                         if (r < 0)
                                 return r;
 
@@ -3868,12 +3883,12 @@ static int make_policy(bool force, RecoveryPinMode recovery_pin_mode) {
                                         policy_session,
                                         encryption_session,
                                         &secret);
-                        if (r < 0 && (r != -ESTALE || attempt >= 16))
+                        if (r < 0 && (r != -ESTALE || attempt >= PCRLOCK_RETRY_UNSEAL_MAX))
                                 return log_error_errno(r, "Failed to unseal PIN: %m");
                         if (r == 0)
                                 break;
 
-                        log_debug("Trying again (attempt %u), as PCR values changed during unlock attempt.", attempt+1);
+                        log_debug("Trying again (attempt %u), as PCR values changed during unlock attempt.", attempt + 1);
                 }
 
                 if (secret.iov_len > sizeof_field(TPM2B_AUTH, buffer))

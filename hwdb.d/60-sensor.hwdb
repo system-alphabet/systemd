@@ -381,6 +381,7 @@ sensor:modalias:platform:HID-SENSOR-200073:dmi:*:svnDellInc.:*:sku0CC4:*    # La
 sensor:modalias:platform:HID-SENSOR-200073:dmi:*:svnDellInc.:*:sku0CC5:*
 sensor:modalias:platform:HID-SENSOR-200073:dmi:*:svnDellInc.:*:sku0CC7:*    # Precision 5490
 sensor:modalias:platform:HID-SENSOR-200073:dmi:*:svnDellInc.:*:sku0CC8:*    # Precision 5690
+sensor:modalias:acpi:HID-SENSOR-200076:dmi:*:svnDellInc.:*:sku0A42:*    # Latitude 5320
  ACCEL_LOCATION=base
 
 sensor:modalias:acpi:INVN6500:*:dmi:*:svnDellInc.:pnVenue8Pro3845:*         # Venue 8 Pro 3845
@@ -792,6 +793,13 @@ sensor:modalias:acpi:KIOX000A:*:dmi:*:rvnMETAPHYUNI:rnMetawillBook01:*    # Meta
 
 sensor:modalias:acpi:KIOX000A:*:dmi:*:svnMicrotech:pne-tabPro:*    # Microtech e-tab Pro
  ACCEL_MOUNT_MATRIX=-1, 0, 0; 0, 1, 0; 0, 0, 1
+
+#########################################
+# Minisforum
+#########################################
+
+sensor:modalias:acpi:SMOCF05:*:dmi:*:svnMicroComputer(HK)TechLimited:pnV3*:*    # V3, V3 SE
+ ACCEL_MOUNT_MATRIX=-1, 0, 0; 0, -1, 0; 0, 0, 1
 
 #########################################
 # MPMAN

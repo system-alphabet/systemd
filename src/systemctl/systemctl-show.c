@@ -15,6 +15,7 @@
 #include "cgroup-show.h"
 #include "cpu-set-util.h"
 #include "errno-util.h"
+#include "escape.h"
 #include "exec-util.h"
 #include "exit-status.h"
 #include "format-util.h"
@@ -643,7 +644,8 @@ static void print_status_info(
                 if (endswith(p->name, "Ex"))
                         continue;
 
-                argv = strv_join(p->argv, " ");
+                if (!strv_isempty(p->argv))
+                        argv = quote_command_line(p->argv, SHELL_ESCAPE_EMPTY);
                 printf("    Process: "PID_FMT" %s=%s ", p->pid, p->name, strna(argv));
 
                 good = is_clean_exit(p->code, p->status, EXIT_CLEAN_DAEMON, NULL);
@@ -2355,15 +2357,14 @@ static int show_one(
 
         log_debug("Showing one %s", path);
 
-        r = bus_map_all_properties(
-                        bus,
-                        "org.freedesktop.systemd1",
-                        path,
-                        show_mode == SYSTEMCTL_SHOW_STATUS ? status_map : property_map,
-                        BUS_MAP_BOOLEAN_AS_BOOL,
-                        &error,
-                        &reply,
-                        &info);
+        r = bus_get_all_properties(bus, "org.freedesktop.systemd1", path, &error, &reply);
+        if (r >= 0 && (show_mode != SYSTEMCTL_SHOW_PROPERTIES || DEBUG_LOGGING))
+                r = bus_message_map_all_properties(
+                                reply,
+                                show_mode == SYSTEMCTL_SHOW_STATUS ? status_map : property_map,
+                                BUS_MAP_BOOLEAN_AS_BOOL,
+                                &error,
+                                &info);
         if (r < 0)
                 return log_error_errno(r, "Failed to get properties: %s", bus_error_message(&error, r));
 

@@ -26,6 +26,7 @@
 #include "bus-locator.h"
 #include "bus-util.h"
 #include "capability-util.h"
+#include "chattr-util.h"
 #include "common-signal.h"
 #include "copy.h"
 #include "discover-image.h"
@@ -53,7 +54,6 @@
 #include "machine-credential.h"
 #include "machine-register.h"
 #include "main-func.h"
-#include "memfd-util.h"
 #include "mkdir.h"
 #include "namespace-util.h"
 #include "netif-util.h"
@@ -238,6 +238,7 @@ COMMAND(
         .argspec = "[ARGUMENTS…]\0",
         .man_pages = "systemd-vmspawn(1)\0",
         .pager_flags = &arg_pager_flags,
+        .flags = COMMAND_EXPERIMENTAL,
 );
 
 static int parse_environment(void) {
@@ -2318,10 +2319,9 @@ static int resolve_disk_driver(DiskType dt, const char *filename, DriveInfo *inf
         return 0;
 }
 
-static int prepare_primary_drive(const char *runtime_dir, DriveInfos *drives) {
+static int prepare_primary_drive(DriveInfos *drives) {
         int r;
 
-        assert(runtime_dir);
         assert(drives);
 
         if (!arg_image)
@@ -2369,16 +2369,51 @@ static int prepare_primary_drive(const char *runtime_dir, DriveInfos *drives) {
          * as qcow2 via blockdev-create, so no filesystem path is needed.
          * Skip for read-only drives (e.g. CDROM) where overlays are not meaningful. */
         if (arg_ephemeral && !FLAGS_SET(d->flags, QMP_DRIVE_READ_ONLY)) {
-                _cleanup_close_ int overlay_fd = open(runtime_dir, O_TMPFILE | O_RDWR | O_CLOEXEC, 0600);
-                if (overlay_fd < 0) {
-                        if (!ERRNO_IS_NOT_SUPPORTED(errno))
-                                return log_error_errno(errno, "Failed to create ephemeral overlay in '%s': %m", runtime_dir);
+                _cleanup_close_ int overlay_fd = -EBADF;
+                _cleanup_free_ char *image_dir = NULL;
+                const char *overlay_dir = NULL;
 
-                        /* Fallback to memfd if O_TMPFILE is not supported */
-                        overlay_fd = memfd_new("vmspawn-overlay");
+                /* /dev/ is a devtmpfs. An overlay next to a block device would therefore use host memory. A
+                 * memfd or a deleted file has no links, and therefore no directory to create the overlay in.
+                 * fd_get_path() returns the path of the opened file. If arg_image is a symlink, the overlay is
+                 * therefore created next to the symlink target. */
+                if (S_ISREG(st.st_mode) && st.st_nlink > 0) {
+                        _cleanup_free_ char *image_path = NULL;
+                        r = fd_get_path(d->fd, &image_path);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to get path of '%s': %m", arg_image);
+
+                        r = path_extract_directory(image_path, &image_dir);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to extract directory from '%s': %m", image_path);
+
+                        overlay_fd = open_tmpfile_unlinkable(image_dir, O_RDWR|O_CLOEXEC);
                         if (overlay_fd < 0)
-                                return log_error_errno(overlay_fd, "Failed to create ephemeral overlay via memfd: %m");
+                                log_debug_errno(overlay_fd,
+                                                "Failed to create ephemeral overlay in '%s', using the directory for large temporary files instead: %m",
+                                                image_dir);
+                        else
+                                overlay_dir = image_dir;
                 }
+
+                if (overlay_fd < 0) {
+                        r = var_tmp_dir(&overlay_dir);
+                        if (r < 0)
+                                return log_error_errno(r, "Failed to determine directory for large temporary files: %m");
+
+                        overlay_fd = open_tmpfile_unlinkable(overlay_dir, O_RDWR|O_CLOEXEC);
+                        if (overlay_fd < 0)
+                                return log_error_errno(overlay_fd, "Failed to create ephemeral overlay in '%s': %m", overlay_dir);
+                }
+
+                /* The guest makes small random writes to the overlay. On btrfs, small random writes fragment a
+                 * copy-on-write file. FS_NOCOW_FL only takes effect while the file is still empty. */
+                r = chattr_fd(overlay_fd, FS_NOCOW_FL, FS_NOCOW_FL);
+                if (r < 0)
+                        log_debug_errno(r, "Failed to disable copy-on-write for ephemeral overlay, ignoring: %m");
+
+                log_debug("Created ephemeral overlay in '%s'.", overlay_dir);
+
                 d->overlay_fd = TAKE_FD(overlay_fd);
                 d->flags |= QMP_DRIVE_NO_FLUSH;
                 d->grow_to = arg_grow_image;
@@ -2479,10 +2514,9 @@ static int assign_pcie_ports(MachineConfig *c) {
         return 0;
 }
 
-static int prepare_device_info(const char *runtime_dir, MachineConfig *c) {
+static int prepare_device_info(MachineConfig *c) {
         int r;
 
-        assert(runtime_dir);
         assert(c);
 
         DriveInfos *drives = &c->drives;
@@ -2493,7 +2527,7 @@ static int prepare_device_info(const char *runtime_dir, MachineConfig *c) {
         if (!drives->drives)
                 return log_oom();
 
-        r = prepare_primary_drive(runtime_dir, drives);
+        r = prepare_primary_drive(drives);
         if (r < 0)
                 return r;
 
@@ -2513,8 +2547,8 @@ static int prepare_device_info(const char *runtime_dir, MachineConfig *c) {
  * deviate slightly from our own names for the same modes (cf. confidential_computing_to_string()):
  * "sev-snp" vs. "amd-sev-snp", and "tdx" vs. "intel-tdx". */
 static const char* const coco_firmware_feature_table[_COCO_MAX] = {
-        [COCO_AMD_SEV_SNP] = "amd-sev-snp",
-        [COCO_INTEL_TDX]   = "intel-tdx",
+        [COCO_SEV_SNP] = "amd-sev-snp",
+        [COCO_TDX]     = "intel-tdx",
 };
 
 DEFINE_PRIVATE_STRING_TABLE_LOOKUP_TO_STRING(coco_firmware_feature, ConfidentialComputing);
@@ -2760,11 +2794,11 @@ static int run_virtual_machine(int kvm_device_fd, int vhost_device_fd) {
                         return r;
         }
 
-        if (arg_confidential_computing == COCO_AMD_SEV_SNP) {
+        if (arg_confidential_computing == COCO_SEV_SNP) {
                 r = qemu_config_key(config_file, "confidential-guest-support", "snp0");
                 if (r < 0)
                         return r;
-        } else if (arg_confidential_computing == COCO_INTEL_TDX) {
+        } else if (arg_confidential_computing == COCO_TDX) {
                 r = qemu_config_key(config_file, "confidential-guest-support", "tdx0");
                 if (r < 0)
                         return r;
@@ -2962,7 +2996,7 @@ static int run_virtual_machine(int kvm_device_fd, int vhost_device_fd) {
                         return r;
         }
 
-        if (arg_confidential_computing == COCO_AMD_SEV_SNP) {
+        if (arg_confidential_computing == COCO_SEV_SNP) {
                 /* SNP marks encrypted guest pages via the "C-bit" in the page table entry. On all
                  * SNP-capable processors (Milan and later) the C-bit lives at bit 51, which reduces
                  * the usable guest physical address space by one bit.
@@ -2976,7 +3010,7 @@ static int run_virtual_machine(int kvm_device_fd, int vhost_device_fd) {
                                         "kernel-hashes", "on");
                 if (r < 0)
                         return r;
-        } else if (arg_confidential_computing == COCO_INTEL_TDX) {
+        } else if (arg_confidential_computing == COCO_TDX) {
                 r = qemu_config_section(config_file, "object", "tdx0",
                                         "qom-type", "tdx-guest");
                 if (r < 0)
@@ -3036,9 +3070,9 @@ static int run_virtual_machine(int kvm_device_fd, int vhost_device_fd) {
          * CPU model. */
         const char *cpu_model =
 #ifdef __x86_64__
-                arg_confidential_computing == COCO_AMD_SEV_SNP ? "EPYC-v4" :
-                arg_confidential_computing == COCO_INTEL_TDX   ? "host"    :
-                                                                 "max,hv_relaxed,hv-vapic,hv-time";
+                arg_confidential_computing == COCO_SEV_SNP ? "EPYC-v4" :
+                arg_confidential_computing == COCO_TDX     ? "host"    :
+                                                             "max,hv_relaxed,hv-vapic,hv-time";
 #else
                 "max";
 #endif
@@ -3616,7 +3650,7 @@ static int run_virtual_machine(int kvm_device_fd, int vhost_device_fd) {
          * /.extra/system_credentials/, so we keep this scoped to SNP for now. Non-SNP guests
          * continue to use the SMBIOS path below, which works with older systemd versions too.
          * Must run after all credential-mutating calls above so the cpio captures the complete set. */
-        bool use_initrd_cpio = arg_confidential_computing == COCO_AMD_SEV_SNP &&
+        bool use_initrd_cpio = arg_confidential_computing == COCO_SEV_SNP &&
                                arg_credentials.n_credentials > 0;
 
         _cleanup_(unlink_and_freep) char *credentials_cpio_path = NULL;
@@ -3823,7 +3857,7 @@ static int run_virtual_machine(int kvm_device_fd, int vhost_device_fd) {
         child_pty = safe_close(child_pty);
         bridge_fds[1] = safe_close(bridge_fds[1]);
 
-        r = prepare_device_info(runtime_dir, &config);
+        r = prepare_device_info(&config);
         if (r < 0)
                 return r;
 
@@ -4079,12 +4113,23 @@ static int determine_names(void) {
                         if (r < 0)
                                 return log_error_errno(r, "Failed to find image for machine '%s': %m", arg_machine);
 
-                        if (IN_SET(i->type, IMAGE_RAW, IMAGE_BLOCK))
+                        switch (i->type) {
+                        case IMAGE_RAW:
+                        case IMAGE_BLOCK:
                                 r = free_and_strdup(&arg_image, i->path);
-                        else if (IN_SET(i->type, IMAGE_DIRECTORY, IMAGE_SUBVOLUME))
+                                break;
+
+                        case IMAGE_DIRECTORY:
+                        case IMAGE_SUBVOLUME:
                                 r = free_and_strdup(&arg_directory, i->path);
-                        else
-                                assert_not_reached();
+                                break;
+
+                        default:
+                                return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
+                                                       "Image '%s' at '%s' has unsupported type '%s'. "
+                                                       "Please use 'systemd-nspawn -M %s' instead.",
+                                                       arg_machine, i->path, image_type_to_string(i->type), arg_machine);
+                        }
                         if (r < 0)
                                 return log_oom();
                 } else {
@@ -4214,7 +4259,7 @@ static int verify_arguments(void) {
                                                "confidential computing firmware is stateless. Use 'off' or 'auto'.");
         }
 
-        if (arg_confidential_computing == COCO_AMD_SEV_SNP) {
+        if (arg_confidential_computing == COCO_SEV_SNP) {
                 if (native_architecture() != ARCHITECTURE_X86_64)
                         return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
                                                "--coco=sev-snp is only supported on x86_64.");
@@ -4237,7 +4282,7 @@ static int verify_arguments(void) {
                                                "so kernel, initrd and cmdline are covered by the launch measurement.");
         }
 
-        if (arg_confidential_computing == COCO_INTEL_TDX) {
+        if (arg_confidential_computing == COCO_TDX) {
                 if (native_architecture() != ARCHITECTURE_X86_64)
                         return log_error_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
                                                "--coco=tdx is only supported on x86_64.");

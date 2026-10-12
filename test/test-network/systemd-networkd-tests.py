@@ -6334,7 +6334,7 @@ class NetworkdTCTests(unittest.TestCase, Utilities):
 
         self.assertRegex(output, 'qdisc ets 3a: root')
         self.assertRegex(output, 'bands 10 strict 3')
-        self.assertRegex(output, 'quanta 1 2 3 4 5')
+        self.assertRegex(output, 'quanta 1001 1002 1003 1004 1005')
         self.assertRegex(output, 'priomap 3 4 5 6 7')
 
     @expectedFailureIfModuleIsNotAvailable('sch_fq')
@@ -6733,6 +6733,23 @@ class NetworkdBondTests(unittest.TestCase, Utilities):
             check_output('ip link set dummy98 down')
             check_output('ip link set dummy98 master bond199')
             self.wait_online('dummy98:enslaved')
+
+    def test_bond_fail_over_mac_restart(self):
+        # The slave needs a lower ifindex than the bond, so that it is enumerated
+        # first and the race is deterministic. So create it before networkd starts.
+        check_output('ip link add dummy98 type dummy')
+        copy_network_unit(
+            '25-bond-fail-over-mac.netdev',
+            '25-bond-fail-over-mac.network',
+            '25-bond-slave.network',
+        )
+        start_networkd()
+        self.wait_online('dummy98:enslaved', 'bond99:routable')
+
+        self.check_link_attr('bond99', 'bonding', 'fail_over_mac', 'active 1')
+
+        restart_networkd()
+        self.wait_online('dummy98:enslaved', 'bond99:routable')
 
     def test_bond_active_slave(self):
         copy_network_unit(

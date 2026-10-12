@@ -2083,7 +2083,7 @@ static int bus_append_directory(sd_bus_message *m, const char *field, const char
                 } else {
                         ExecDirectoryFlags exec_directory_flags = exec_directory_flags_from_string(flags);
                         if (exec_directory_flags < 0 || (exec_directory_flags & ~_EXEC_DIRECTORY_FLAGS_PUBLIC) != 0)
-                                return log_error_errno(r, "Failed to parse flags for %s=: '%s'", field, flags);
+                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Failed to parse flags for %s=: '%s'", field, flags);
 
                         if (!isempty(dest)) {
                                 path_simplify(dest);
@@ -2199,7 +2199,7 @@ static int bus_append_quota_directory(sd_bus_message *m, const char *field, cons
                 if (r < 0) {
                         r = parse_size(eq, 1024, &quota_absolute);
                         if (r < 0)
-                                return log_error_errno(SYNTHETIC_ERRNO(EINVAL), "Failed to parse argument: %s=%s", field, eq);
+                                return log_error_errno(r, "Failed to parse argument: %s=%s", field, eq);
                 } else
                         quota_scale = UINT32_SCALE_FROM_PERMYRIAD(r);
 
@@ -3092,11 +3092,15 @@ int bus_append_scope_pidref(sd_bus_message *m, const PidRef *pidref, bool allow_
                         "PIDs", "au", 1, pidref->pid);
 }
 
-int bus_deserialize_and_dump_unit_file_changes(sd_bus_message *m, bool quiet) {
+int bus_deserialize_unit_file_changes(sd_bus_message *m, InstallChange **ret_changes, size_t *ret_n_changes) {
         const char *type, *path, *source;
         InstallChange *changes = NULL;
         size_t n_changes = 0;
         int r;
+
+        assert(m);
+        assert(ret_changes);
+        assert(ret_n_changes);
 
         CLEANUP_ARRAY(changes, n_changes, install_changes_free);
 
@@ -3126,6 +3130,23 @@ int bus_deserialize_and_dump_unit_file_changes(sd_bus_message *m, bool quiet) {
         r = sd_bus_message_exit_container(m);
         if (r < 0)
                 return bus_log_parse_error(r);
+
+        *ret_changes = TAKE_PTR(changes);
+        *ret_n_changes = n_changes;
+
+        return 0;
+}
+
+int bus_deserialize_and_dump_unit_file_changes(sd_bus_message *m, bool quiet) {
+        InstallChange *changes = NULL;
+        size_t n_changes = 0;
+        int r;
+
+        CLEANUP_ARRAY(changes, n_changes, install_changes_free);
+
+        r = bus_deserialize_unit_file_changes(m, &changes, &n_changes);
+        if (r < 0)
+                return r;
 
         install_changes_dump(0, NULL, changes, n_changes, quiet);
 

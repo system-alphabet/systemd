@@ -1842,7 +1842,6 @@ int tpm2_get_best_attestation_key_template(Tpm2Context *c, TPMT_PUBLIC *ret) {
                                 TPMA_OBJECT_FIXEDPARENT |
                                 TPMA_OBJECT_SENSITIVEDATAORIGIN |
                                 TPMA_OBJECT_USERWITHAUTH |
-                                TPMA_OBJECT_ADMINWITHPOLICY |
                                 TPMA_OBJECT_RESTRICTED |
                                 TPMA_OBJECT_SIGN_ENCRYPT,
                         .parameters.asymDetail = {
@@ -3183,6 +3182,51 @@ int tpm2_tpml_pcr_selection_from_pcr_values(
         return 0;
 }
 
+/* Convert a set of PCR values into the ordered list of digests described by the supplied PCR selection,
+ * ie. the order in which the TPM digests them. */
+int tpm2_pcr_values_to_digests_for_selection(
+                const TPML_PCR_SELECTION *selection,
+                const Tpm2PCRValue *pcr_values,
+                size_t n_pcr_values,
+                TPM2B_DIGEST **ret_values,
+                size_t *ret_n_values) {
+
+        _cleanup_free_ TPM2B_DIGEST *values = NULL;
+        size_t n_values = 0;
+
+        assert(selection);
+        assert(pcr_values || n_pcr_values == 0);
+        assert(ret_values);
+        assert(ret_n_values);
+
+        FOREACH_PCR_IN_TPML_PCR_SELECTION(pcr, s, selection) {
+                unsigned pcr_index = (unsigned) pcr;
+                const Tpm2PCRValue *found = NULL;
+
+                FOREACH_ARRAY(v, pcr_values, n_pcr_values)
+                        if (v->index == pcr_index && v->hash == s->hash) {
+                                found = v;
+                                break;
+                        }
+
+                if (!found)
+                        return log_debug_errno(SYNTHETIC_ERRNO(ENOENT),
+                                               "Missing PCR value for hash 0x%" PRIx16 " index %u.", s->hash, pcr_index);
+
+                if (!tpm2_pcr_value_valid(found) || found->value.size == 0)
+                        return log_debug_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "PCR value for hash 0x%" PRIx16 " index %u is not valid.", s->hash, pcr_index);
+
+                if (!GREEDY_REALLOC_APPEND(values, n_values, &found->value, 1))
+                        return log_oom_debug();
+        }
+
+        *ret_values = TAKE_PTR(values);
+        *ret_n_values = n_values;
+
+        return 0;
+}
+
 /* Count the number of different hash algorithms for all the entries. */
 int tpm2_pcr_values_hash_count(const Tpm2PCRValue *pcr_values, size_t n_pcr_values, size_t *ret_count) {
         TPML_PCR_SELECTION selection;
@@ -4290,17 +4334,49 @@ int tpm2_digest_iovec_to_data(TPMI_ALG_HASH alg, const struct iovec *digest, TPM
         return tpm2_digest_buf_to_data(alg, digest->iov_base, digest->iov_len, ret);
 }
 
+#if HAVE_OPENSSL
+/* Look up the OpenSSL name and digest size of a TPM hash algorithm, and check that the digest fits in a
+ * TPM2B_DIGEST. */
+static int tpm2_digest_alg_lookup(TPMI_ALG_HASH alg, const char **ret_alg_name, size_t *ret_digest_size) {
+        int r;
+
+        assert(ret_digest_size);
+
+        const char *alg_name = tpm2_hash_alg_to_string(alg);
+        if (!alg_name)
+                return log_debug_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
+                                       "Hash algorithm not supported: 0x%x", alg);
+
+        size_t digest_size;
+        r = openssl_digest_size(alg_name, &digest_size);
+        if (r < 0)
+                return r;
+
+        if (digest_size > sizeof_field(TPM2B_DIGEST, buffer))
+                return log_debug_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
+                                       "Digest size %zu of hash algorithm 0x%x too large for TPM2B_DIGEST",
+                                       digest_size, alg);
+
+        if (ret_alg_name)
+                *ret_alg_name = alg_name;
+        *ret_digest_size = digest_size;
+        return 0;
+}
+#endif
+
 /* Hash data into the digest.
  *
  * If 'extend' is true, the hashing operation starts with the existing digest hash (and the digest is
  * required to have a hash and its size must be correct). If 'extend' is false, the digest size is
  * initialized to the correct size for 'alg' and the hashing operation does not include any existing digest
- * hash. If 'extend' is false and no data is provided, the digest is initialized to a zero digest.
+ * hash.
  *
  * On success, the digest hash will be updated with the hashing operation result and the digest size will be
- * correct for 'alg'.
+ * correct for 'alg'. If 'extend' is false and no data is provided, the digest hash will be updated with the
+ * digest of an empty buffer.
  *
- * This currently only provides SHA256, so 'alg' must be TPM2_ALG_SHA256. */
+ * Any hash algorithm known to both tpm2_hash_alg_to_string() and OpenSSL may be used. Without OpenSSL,
+ * only SHA256 is available. */
 int tpm2_digest_many(
                 TPMI_ALG_HASH alg,
                 TPM2B_DIGEST *digest,
@@ -4308,21 +4384,58 @@ int tpm2_digest_many(
                 size_t n_data,
                 bool extend) {
 
-        struct sha256_ctx ctx;
-
         assert(digest);
         assert(data || n_data == 0);
+
+#if HAVE_OPENSSL
+        const char *alg_name;
+        size_t digest_size;
+        int r;
+
+        r = tpm2_digest_alg_lookup(alg, &alg_name, &digest_size);
+        if (r < 0)
+                return r;
+
+        _cleanup_free_ struct iovec *iovecs = NULL;
+        if (extend) {
+                if (digest->size != digest_size)
+                        return log_debug_errno(SYNTHETIC_ERRNO(EINVAL),
+                                               "Digest size %" PRIu16 ", require %zu", digest->size, digest_size);
+
+                iovecs = new(struct iovec, n_data + 1);
+                if (!iovecs)
+                        return log_oom_debug();
+
+                iovecs[0] = IOVEC_MAKE(digest->buffer, digest->size);
+                memcpy_safe(iovecs + 1, data, n_data * sizeof(struct iovec));
+
+                data = iovecs;
+                n_data++;
+        }
+
+        _cleanup_(erase_and_freep) void *hash = NULL;
+        r = openssl_digest_many(alg_name, data, n_data, &hash, /* ret_digest_size= */ NULL);
+        if (r < 0)
+                return r;
+
+        *digest = (TPM2B_DIGEST) {
+                .size = digest_size,
+        };
+        memcpy(digest->buffer, hash, digest_size);
+
+        return 0;
+#else /* HAVE_OPENSSL */
+        struct sha256_ctx ctx;
 
         if (alg != TPM2_ALG_SHA256)
                 return log_debug_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
                                        "Hash algorithm not supported: 0x%x", alg);
 
         if (extend && digest->size != SHA256_DIGEST_SIZE)
-                return log_debug_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
+                return log_debug_errno(SYNTHETIC_ERRNO(EINVAL),
                                        "Digest size 0x%x, require 0x%x",
-                                       digest->size, (unsigned)SHA256_DIGEST_SIZE);
+                                       digest->size, (unsigned) SHA256_DIGEST_SIZE);
 
-        /* Since we're hardcoding SHA256 (for now), we can check this at compile time. */
         assert_cc(sizeof(digest->buffer) >= SHA256_DIGEST_SIZE);
 
         CLEANUP_ERASE(ctx);
@@ -4335,8 +4448,6 @@ int tpm2_digest_many(
                 *digest = (TPM2B_DIGEST) {
                         .size = SHA256_DIGEST_SIZE,
                 };
-                if (n_data == 0) /* If not extending and no data, return zero hash */
-                        return 0;
         }
 
         FOREACH_ARRAY(d, data, n_data)
@@ -4345,6 +4456,7 @@ int tpm2_digest_many(
         sha256_finish_ctx(&ctx, digest->buffer);
 
         return 0;
+#endif
 }
 
 /* Same as tpm2_digest_many() but data is contained in TPM2B_DIGEST[]. The digests may be any size digests. */
@@ -4367,6 +4479,37 @@ int tpm2_digest_many_digests(
                 iovecs[i] = IOVEC_MAKE((void*) data[i].buffer, data[i].size);
 
         return tpm2_digest_many(alg, digest, iovecs, n_data, extend);
+}
+
+/* Zero initialize a digest buffer.
+ *
+ * Any hash algorithm known to both tpm2_hash_alg_to_string() and OpenSSL may be used. Without OpenSSL,
+ * only SHA256 is available. */
+int tpm2_digest_init(TPMI_ALG_HASH alg, TPM2B_DIGEST *digest) {
+#if HAVE_OPENSSL
+        size_t digest_size;
+        int r;
+
+        r = tpm2_digest_alg_lookup(alg, /* ret_alg_name= */ NULL, &digest_size);
+        if (r < 0)
+                return r;
+
+        *digest = (TPM2B_DIGEST) {
+                .size = digest_size,
+        };
+        return 0;
+#else
+        if (alg != TPM2_ALG_SHA256)
+                return log_debug_errno(SYNTHETIC_ERRNO(EOPNOTSUPP),
+                                       "Hash algorithm not supported: 0x%x", alg);
+
+        assert_cc(sizeof(digest->buffer) >= SHA256_DIGEST_SIZE);
+
+        *digest = (TPM2B_DIGEST) {
+                .size = SHA256_DIGEST_SIZE,
+        };
+        return 0;
+#endif
 }
 
 /* This hashes the provided pin into a digest value, but also verifies that the final byte is not 0, because
@@ -4539,7 +4682,7 @@ static bool tpm2_is_audit_session(Tpm2Context *c, const Tpm2Handle *session) {
         return flags & TPMA_SESSION_AUDIT;
 }
 
-int tpm2_make_exclusive_audit_session(Tpm2Context *c, Tpm2Handle **ret_session) {
+int tpm2_make_exclusive_audit_session(Tpm2Context *c, TPMI_ALG_HASH hash, Tpm2Handle **ret_session) {
         TSS2_RC rc;
         int r;
 
@@ -4547,6 +4690,11 @@ int tpm2_make_exclusive_audit_session(Tpm2Context *c, Tpm2Handle **ret_session) 
         assert(ret_session);
 
         log_debug("Starting HMAC exclusive audit session.");
+
+        /* The caller can specify a hash algorithm, but we only support SHA-256 for now. */
+        if (hash != TPM2_ALG_SHA256)
+                return log_debug_errno(SYNTHETIC_ERRNO(EINVAL),
+                                       "Unsupported hash algorithm for audit session: only SHA-256 is supported");
 
         _cleanup_(tpm2_handle_freep) Tpm2Handle *session = NULL;
         r = tpm2_handle_new(c, &session);
@@ -4563,7 +4711,7 @@ int tpm2_make_exclusive_audit_session(Tpm2Context *c, Tpm2Handle **ret_session) 
                         /* nonceCaller= */ NULL,
                         TPM2_SE_HMAC,
                         &SESSION_TEMPLATE_SYM_NULL,
-                        TPM2_ALG_SHA256,
+                        hash,
                         &session->esys_handle);
         if (rc != TSS2_RC_SUCCESS)
                 return log_debug_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE),
@@ -7197,13 +7345,17 @@ int tpm2_unseal(Tpm2Context *c,
          *   -ENOLCK          → TPM is in dictionary lockout mode
          *   -EREMCHG         → submitted policy doesn't match NV index stored policy (in case of PolicyAuthorizeNV)
          *   -ENOANO          → none of the PolicyOR branches of a policy matched current state
-         *   -EUCLEAN         → PCR state doesn't match expectations
+         *   -EUCLEAN         → a PCR kept being extended while we were unsealing
          *   -EPERM           → stored policy does not match TPM state
          *   -ENOTRECOVERABLE → all other kinds of TPM errors
          *   -EILSEQ          → bad PIN
          *
-         * Of these all four of EREMCHG, ENOANO, EUCLEAN, EPERM can all mean that PCR state is not matching
-         * expectations. */
+         * Of these EREMCHG, ENOANO and EPERM mean that PCR state is not matching expectations. EUCLEAN on
+         * the other hand says nothing about the correctness of the policy: it means the TPM's global PCR
+         * update counter kept moving while we built the policy or unsealed, i.e. something on this system
+         * extends a PCR continuously (the usual suspect is PCR 10 when IMA is enabled directly, or
+         * indirectly via secure boot). We make at most RETRY_UNSEAL_MAX + 1 attempts before reporting
+         * it. */
 
         TSS2_RC rc;
         int r;
@@ -7361,7 +7513,10 @@ int tpm2_unseal(Tpm2Context *c,
                                         !!pin,
                                         (shard == 1 || !iovec_is_set(pubkey)) ? pcrlock_policy : NULL,
                                         &policy_digest);
-                        if (r == -EUCLEAN && i > 0) {
+                        if (r == -EUCLEAN) {
+                                if (i == 0)
+                                        return log_debug_errno(r, "PCR values kept changing while building the TPM2 policy, giving up after %u unsealing attempts.", RETRY_UNSEAL_MAX + 1);
+
                                 log_debug("A PCR value changed during the TPM2 policy session, restarting HMAC key unsealing (%u tries left).", i);
                                 retry = true;
                                 break;
@@ -7403,7 +7558,11 @@ int tpm2_unseal(Tpm2Context *c,
                                         encryption_session->esys_handle, /* use HMAC session to enable parameter encryption */
                                         ESYS_TR_NONE,
                                         &unsealed);
-                        if (rc == TPM2_RC_PCR_CHANGED && i > 0) {
+                        if (rc == TPM2_RC_PCR_CHANGED) {
+                                if (i == 0)
+                                        return log_debug_errno(SYNTHETIC_ERRNO(EUCLEAN),
+                                                               "PCR values kept changing while unsealing, giving up after %u unsealing attempts.", RETRY_UNSEAL_MAX + 1);
+
                                 log_debug("A PCR value changed during the TPM2 policy session, restarting HMAC key unsealing (%u tries left).", i);
                                 retry = true;
                                 break;
@@ -8760,7 +8919,7 @@ static int nvpcr_data_load(const char *name, NvPCRData *ret) {
         _cleanup_fclose_ FILE *f = NULL;
         r = search_and_fopen_nulstr(fname, "re", /* root= */ NULL, CONF_PATHS_NULSTR("nvpcr"), &f, &path);
         if (r < 0)
-                return r;
+                return log_debug_errno(r, "Failed to open NvPCR definition '%s': %m", fname);
 
         _cleanup_(sd_json_variant_unrefp) sd_json_variant *v = NULL;
         r = sd_json_parse_file(
@@ -9285,6 +9444,13 @@ int tpm2_nvpcr_initialize(
                                 signature_json,
                                 &authorize_policy,
                                 &policy_session);
+                if (r == -EUCLEAN) {
+                        /* A PCR was extended while we submitted the policy, so this session is unusable.
+                         * Same situation as below, just observed while building the policy rather than
+                         * while writing. */
+                        if (i > 0)
+                                continue;
+                }
                 if (r < 0)
                         return r;
 
@@ -9825,15 +9991,10 @@ int tpm2_policy_super_pcr(
                                 session,
                                 &pcr_selection,
                                 &current_policy_digest);
-                if (r == -EUCLEAN) {
-                        _cleanup_free_ char *j = NULL;
-
-                        for (uint32_t pcr = 0; pcr < TPM2_PCRS_MAX; pcr++)
-                                if (single_value_pcrs & (UINT32_C(1) << pcr))
-                                        (void) strextendf_with_separator(&j, ", ", "%" PRIu32, pcr);
-
-                        return log_error_errno(r, "Combined value for PCR(s) %s encoded in policy does not match the current TPM state. Either the system has been tampered with or the provided policy is incorrect.", strna(j));
-                }
+                /* -EUCLEAN means some PCR got extended while we were submitting the policy. That's
+                 * transient, so only log at debug level and let the caller restart the session. */
+                if (r == -EUCLEAN)
+                        return log_debug_errno(r, "PCR state changed while submitting the combined PolicyPCR expression, session needs to be restarted.");
                 if (r < 0)
                         return log_error_errno(r, "Failed to submit PCR policy to TPM: %m");
 
@@ -9865,7 +10026,7 @@ int tpm2_policy_super_pcr(
                                 &pcr_selection,
                                 &current_policy_digest);
                 if (r == -EUCLEAN)
-                        return log_error_errno(r, "Value for PCR %" PRIu32 " encoded in policy does not match the current TPM state. Either the system has been tampered with or the provided policy is incorrect.", pcr);
+                        return log_debug_errno(r, "PCR state changed while submitting the PolicyPCR expression for PCR %" PRIu32 ", session needs to be restarted.", pcr);
                 if (r < 0)
                         return log_error_errno(r, "Failed to submit PCR policy to TPM: %m");
 
@@ -10392,7 +10553,7 @@ int tpm2_tpmt_public_to_pem(const TPMT_PUBLIC *public, char **ret) {
 #endif
 }
 
-static const char* tpm2_hash_alg_to_string_tss2(TPMI_ALG_HASH alg) {
+const char* tpm2_hash_alg_to_string_tss2(TPMI_ALG_HASH alg) {
         /* Note that this is different to tpm2_hash_alg_to_string because it
          * returns a string that aligns with those produced by TSS2 and compatible
          * with the TCG TSS2 JSON format. The JSON format is actually not case
@@ -10901,6 +11062,17 @@ int tpm2_tpms_nv_public_to_json(const TPMS_NV_PUBLIC *nv_public, sd_json_variant
 
         *ret = TAKE_PTR(v);
         return 0;
+}
+
+int tpm2_pcr_value_to_json(const Tpm2PCRValue *pcr_value, sd_json_variant **ret) {
+        assert(pcr_value);
+        assert(ret);
+
+        return sd_json_buildo(
+                ret,
+                SD_JSON_BUILD_PAIR_UNSIGNED("pcr", pcr_value->index),
+                SD_JSON_BUILD_PAIR_STRING("hashAlg", tpm2_hash_alg_to_string_tss2(pcr_value->hash)),
+                SD_JSON_BUILD_PAIR_HEX("digest", pcr_value->value.buffer, pcr_value->value.size));
 }
 
 static const TPMT_SIG_SCHEME SIG_SCHEME_TEMPLATE_NULL = {
@@ -12025,8 +12197,16 @@ int tpm2_load_pcr_signature(const char *path, sd_json_variant **ret) {
                 return log_debug_errno(r, "Failed to find TPM PCR signature file '%s': %m", path);
 
         r = sd_json_parse_file(f, discovered_path, 0, ret, NULL, NULL);
-        if (r < 0)
-                return log_debug_errno(r, "Failed to parse TPM PCR signature JSON object '%s': %m", discovered_path);
+        if (r == -ENOMEM)
+                return log_oom_debug();
+        if (r < 0) {
+                log_debug_errno(r, "Failed to parse TPM PCR signature JSON object '%s': %m", discovered_path);
+
+                /* Don't propagate the parser's errno: it reports a string that is not valid UTF-8 as
+                 * -EUCLEAN, and to our callers that errno means "a PCR kept being extended". Report a
+                 * malformed file as such instead, whichever way it is malformed. */
+                return -EBADMSG;
+        }
 
         return 0;
 }

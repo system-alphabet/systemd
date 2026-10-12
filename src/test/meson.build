@@ -57,6 +57,7 @@ generated_sources += [test_libsystemd_sym_c, test_libudev_sym_c]
 
 simple_tests += files(
         'test-alloc-util.c',
+        'test-ansi-seq.c',
         'test-architecture.c',
         'test-argv-util.c',
         'test-arphrd-util.c',
@@ -104,6 +105,7 @@ simple_tests += files(
         'test-execve.c',
         'test-exit-status.c',
         'test-extract-word.c',
+        'test-fanotify-util.c',
         'test-fdset.c',
         'test-fiemap.c',
         'test-fileio.c',
@@ -293,6 +295,11 @@ executables += [
                 ],
         },
         test_template + {
+                'sources' : files('test-console-stdio.c'),
+                'type' : 'unsafe',
+                'parallel' : false,
+        },
+        test_template + {
                 'sources' : files('test-coredump-stacktrace.c'),
                 'type' : 'manual',
                 # This test intentionally crashes with SIGSEGV by dereferencing a NULL pointer
@@ -324,10 +331,7 @@ executables += [
                 'type' : 'manual',
         },
         test_template + {
-                'sources' : files(
-                        'test-dlopen-so.c',
-                        'gcrypt-util.c',
-                ),
+                'sources' : files('test-dlopen-so.c'),
                 'dependencies' : [
                         libacl_cflags,
                         libapparmor_cflags,
@@ -339,7 +343,6 @@ executables += [
                         libcurl_cflags,
                         libfdisk_cflags,
                         libfido2_cflags,
-                        libgcrypt_cflags,
                         libgnutls_cflags,
                         libidn2_cflags,
                         libkmod_cflags,
@@ -401,8 +404,15 @@ executables += [
                 'timeout' : 180,
         },
         test_template + {
+                'sources' : files('test-hostname-pick-word.c'),
+                'type' : 'manual',
+        },
+        test_template + {
                 'sources' : files('test-ipcrm.c'),
                 'type' : 'unsafe',
+        },
+        test_template + {
+                'sources' : files('test-kernel-image.c'),
         },
         test_template + {
                 'sources' : files('test-kexec.c'),

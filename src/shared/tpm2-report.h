@@ -30,6 +30,10 @@ DECLARE_STRING_TABLE_LOOKUP(tpm2_report_component_type, Tpm2ReportComponentType)
 typedef struct Tpm2ReportComponent {
         Tpm2ReportComponentType type;
 
+        /* For PCRs only */
+        Tpm2PCRValue *pcr_values;
+        size_t n_pcr_values;
+
         /* For NvPCRs only */
         char *nv_pcr_name;
         TPMS_NV_PUBLIC *nv_public;
@@ -38,6 +42,9 @@ typedef struct Tpm2ReportComponent {
          * for other types, except session audit where the qualifying
          * data is the report digest we get. */
         char *authenticated_data;
+
+        /* For session audit only */
+        TPMI_ALG_HASH session_audit_hash_alg;
 
         /* Common fields */
         TPMS_ATTEST *attestation;
