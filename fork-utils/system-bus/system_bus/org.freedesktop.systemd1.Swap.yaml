@@ -998,6 +998,10 @@ properties:
   type: (bas)
 - access: read
   annotations: {}
+  name: IOUringFilter
+  type: (bas)
+- access: read
+  annotations: {}
   name: RuntimeDirectorySymlink
   type: a(sst)
 - access: read
@@ -1072,6 +1076,10 @@ properties:
   annotations: {}
   name: LogsDirectory
   type: as
+- access: read
+  annotations: {}
+  name: ConfigurationDirectorySymlink
+  type: a(sst)
 - access: read
   annotations: {}
   name: ConfigurationDirectoryMode
