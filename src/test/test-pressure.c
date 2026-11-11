@@ -17,6 +17,7 @@
 #include "event-util.h"
 #include "fd-util.h"
 #include "format-util.h"
+#include "fs-util.h"
 #include "hashmap.h"
 #include "path-util.h"
 #include "pidref.h"
@@ -92,7 +93,7 @@ static int fake_pressure_callback(sd_event_source *s, void *userdata) {
         log_notice("pressure event: %s", d);
 
         if (*value == 7 * 'f' * 's')
-                ASSERT_OK(sd_event_exit(sd_event_source_get_event(s), 0));
+                ASSERT_OK(sd_event_exit(sd_event_source_get_event(s), /* code= */ 0));
 
         return 0;
 }
@@ -119,12 +120,12 @@ static void test_fake_pressure(
 
         ASSERT_OK(sd_event_default(&e));
 
-        ASSERT_OK(mkdtemp_malloc(NULL, &tmp));
+        ASSERT_OK(mkdtemp_malloc(/* template= */ NULL, &tmp));
 
         _cleanup_free_ char *j = ASSERT_NOT_NULL(path_join(tmp, "fifo"));
         ASSERT_OK_ERRNO(mkfifo(j, 0600));
-        fifo_fd = open(j, O_CLOEXEC|O_RDWR|O_NONBLOCK);
-        ASSERT_OK_ERRNO(fifo_fd);
+        fifo_fd = xopenat(AT_FDCWD, j, O_RDWR|O_NONBLOCK);
+        ASSERT_OK(fifo_fd);
 
         _cleanup_free_ char *k = ASSERT_NOT_NULL(path_join(tmp, "sock"));
         socket_fd = socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC, 0);
@@ -247,7 +248,7 @@ static int real_memory_pressure_callback(sd_event_source *s, void *userdata) {
         sd_event_trim_memory();
 
         ASSERT_NOT_NULL(c->pid);
-        ASSERT_OK(sd_event_source_send_child_signal(c->pid, SIGKILL, NULL, 0));
+        ASSERT_OK(sd_event_source_send_child_signal(c->pid, SIGKILL, /* si= */ NULL, /* flags= */ 0));
         c->pid = NULL;
 
         return 0;
@@ -310,7 +311,7 @@ TEST(real_memory_pressure) {
         ASSERT_OK(sd_bus_message_close_container(m));
         ASSERT_OK(sd_bus_message_append(m, "a(sa(sv))", 0));
 
-        r = sd_bus_call(bus, m, 0, &error, &reply);
+        r = sd_bus_call(bus, m, /* usec= */ 0, &error, &reply);
         if (r < 0)
                 return (void) log_tests_skipped_errno(r, "can't issue transient unit call");
 
@@ -335,8 +336,8 @@ TEST(real_memory_pressure) {
                 _exit(EXIT_SUCCESS);
         }
 
-        ASSERT_OK(event_add_child_pidref(e, &cs, &pidref, WEXITED, real_pressure_child_callback, NULL));
-        ASSERT_OK(sd_event_source_set_child_process_own(cs, true));
+        ASSERT_OK(event_add_child_pidref(e, &cs, &pidref, WEXITED, real_pressure_child_callback, /* userdata= */ NULL));
+        ASSERT_OK(sd_event_source_set_child_process_own(cs, /* own= */ true));
 
         ASSERT_OK_ERRNO(unsetenv("MEMORY_PRESSURE_WATCH"));
         ASSERT_OK_ERRNO(unsetenv("MEMORY_PRESSURE_WRITE"));
@@ -365,7 +366,7 @@ TEST(real_memory_pressure) {
 
         printf("current: %" PRIu64 "\n", mcurrent);
         if (mcurrent == UINT64_MAX)
-                return (void) log_tests_skipped_errno(r, "memory accounting not available");
+                return (void) log_tests_skipped("memory accounting not available");
 
         m = sd_bus_message_unref(m);
 
@@ -376,13 +377,13 @@ TEST(real_memory_pressure) {
         ASSERT_OK(sd_bus_message_append(m, "(sv)", "MemoryMax", "t", mcurrent + (50 * 1024 * 1024)));
         ASSERT_OK(sd_bus_message_close_container(m));
 
-        ASSERT_OK(sd_bus_call(bus, m, 0, NULL, NULL));
+        ASSERT_OK(sd_bus_call(bus, m, /* usec= */ 0, /* reterr_error= */ NULL, /* ret_reply= */ NULL));
 
         /* Generate some memory allocations via mempool */
 #define NN (1024)
         Hashmap **h = new(Hashmap*, NN);
         for (int i = 0; i < NN; i++)
-                h[i] = hashmap_new(NULL);
+                h[i] = hashmap_new(/* hash_ops= */ NULL);
         for (int i = 0; i < NN; i++)
                 hashmap_free(h[i]);
         free(h);
@@ -410,7 +411,7 @@ static int real_cpu_pressure_callback(sd_event_source *s, void *userdata) {
         log_notice("real cpu pressure event: %s", d);
 
         ASSERT_NOT_NULL(c->pid);
-        ASSERT_OK(sd_event_source_send_child_signal(c->pid, SIGKILL, NULL, 0));
+        ASSERT_OK(sd_event_source_send_child_signal(c->pid, SIGKILL, /* si= */ NULL, /* flags= */ 0));
         c->pid = NULL;
 
         return 0;
@@ -455,7 +456,7 @@ TEST(real_cpu_pressure) {
         ASSERT_OK(sd_bus_message_close_container(m));
         ASSERT_OK(sd_bus_message_append(m, "a(sa(sv))", 0));
 
-        r = sd_bus_call(bus, m, 0, &error, &reply);
+        r = sd_bus_call(bus, m, /* usec= */ 0, &error, &reply);
         if (r < 0)
                 return (void) log_tests_skipped_errno(r, "can't issue transient unit call");
 
@@ -480,8 +481,8 @@ TEST(real_cpu_pressure) {
                 _exit(EXIT_SUCCESS);
         }
 
-        ASSERT_OK(event_add_child_pidref(e, &cs, &pidref, WEXITED, real_pressure_child_callback, NULL));
-        ASSERT_OK(sd_event_source_set_child_process_own(cs, true));
+        ASSERT_OK(event_add_child_pidref(e, &cs, &pidref, WEXITED, real_pressure_child_callback, /* userdata= */ NULL));
+        ASSERT_OK(sd_event_source_set_child_process_own(cs, /* own= */ true));
 
         ASSERT_OK_ERRNO(unsetenv("CPU_PRESSURE_WATCH"));
         ASSERT_OK_ERRNO(unsetenv("CPU_PRESSURE_WRITE"));
@@ -509,7 +510,7 @@ TEST(real_cpu_pressure) {
         ASSERT_OK(sd_bus_message_append(m, "(sv)", "CPUQuotaPerSecUSec", "t", (uint64_t) 1000)); /* 0.1% CPU */
         ASSERT_OK(sd_bus_message_close_container(m));
 
-        ASSERT_OK(sd_bus_call(bus, m, 0, NULL, NULL));
+        ASSERT_OK(sd_bus_call(bus, m, /* usec= */ 0, /* reterr_error= */ NULL, /* ret_reply= */ NULL));
 
         /* Now start eating CPU */
         ASSERT_EQ(write(pipe_fd[1], &(const char) { 'x' }, 1), 1);
@@ -534,7 +535,7 @@ static int real_io_pressure_callback(sd_event_source *s, void *userdata) {
         log_notice("real io pressure event: %s", d);
 
         ASSERT_NOT_NULL(c->pid);
-        ASSERT_OK(sd_event_source_send_child_signal(c->pid, SIGKILL, NULL, 0));
+        ASSERT_OK(sd_event_source_send_child_signal(c->pid, SIGKILL, /* si= */ NULL, /* flags= */ 0));
         c->pid = NULL;
 
         return 0;
@@ -548,7 +549,8 @@ _noreturn_ static void real_pressure_eat_io(int pipe_fd) {
         for (;;) {
                 _cleanup_close_ int fd = -EBADF;
 
-                fd = open(LOCALSTATEDIR SYSTEM_TMPDIR "/.io-pressure-test", O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0600);
+                fd = xopenat_full(AT_FDCWD, LOCALSTATEDIR SYSTEM_TMPDIR "/.io-pressure-test", O_WRONLY|O_CREAT|O_TRUNC,
+                                  /* xopen_flags= */ 0, 0600);
                 if (fd < 0)
                         continue;
 
@@ -591,7 +593,7 @@ TEST(real_io_pressure) {
         ASSERT_OK(sd_bus_message_close_container(m));
         ASSERT_OK(sd_bus_message_append(m, "a(sa(sv))", 0));
 
-        r = sd_bus_call(bus, m, 0, &error, &reply);
+        r = sd_bus_call(bus, m, /* usec= */ 0, &error, &reply);
         if (r < 0)
                 return (void) log_tests_skipped_errno(r, "can't issue transient unit call");
 
@@ -616,8 +618,8 @@ TEST(real_io_pressure) {
                 _exit(EXIT_SUCCESS);
         }
 
-        ASSERT_OK(event_add_child_pidref(e, &cs, &pidref, WEXITED, real_pressure_child_callback, NULL));
-        ASSERT_OK(sd_event_source_set_child_process_own(cs, true));
+        ASSERT_OK(event_add_child_pidref(e, &cs, &pidref, WEXITED, real_pressure_child_callback, /* userdata= */ NULL));
+        ASSERT_OK(sd_event_source_set_child_process_own(cs, /* own= */ true));
 
         ASSERT_OK_ERRNO(unsetenv("IO_PRESSURE_WATCH"));
         ASSERT_OK_ERRNO(unsetenv("IO_PRESSURE_WRITE"));
@@ -650,7 +652,7 @@ TEST(real_io_pressure) {
         ASSERT_OK(sd_bus_message_close_container(m));
         ASSERT_OK(sd_bus_message_close_container(m));
 
-        ASSERT_OK(sd_bus_call(bus, m, 0, NULL, NULL));
+        ASSERT_OK(sd_bus_call(bus, m, /* usec= */ 0, /* reterr_error= */ NULL, /* ret_reply= */ NULL));
 
         /* Now start eating IO */
         ASSERT_EQ(write(pipe_fd[1], &(const char) { 'x' }, 1), 1);

@@ -28,6 +28,7 @@ systemctl_sources = files(
         'systemctl-start-special.c',
         'systemctl-switch-root.c',
         'systemctl-trivial-method.c',
+        'systemctl-wait.c',
         'systemctl-whoami.c',
 )
 systemctl_export_sources = files(
@@ -43,8 +44,6 @@ systemctl_export_sources = files(
 executables += [
         executable_template + {
                 'name' : 'systemctl',
-                'public' : true,
-                'conditions' : ['ENABLE_SYSTEMCTL'],
                 'sources' : systemctl_sources,
                 'export' : systemctl_export_sources,
                 'dependencies' : [
@@ -62,7 +61,6 @@ executables += [
                 ],
         },
         fuzz_template + {
-                'conditions' : ['ENABLE_SYSTEMCTL'],
                 'sources' : files('fuzz-systemctl-parse-argv.c'),
                 'import' : ['systemctl'],
                 'dependencies' : [

@@ -24,6 +24,7 @@
 #include "fileio.h"
 #include "format-table.h"
 #include "format-util.h"
+#include "fs-util.h"
 #include "hash-funcs.h"
 #include "hashmap.h"
 #include "io-util.h"
@@ -284,13 +285,11 @@ static int workload_load_journal(Workload *w) {
                 return log_error_errno(errno, "Failed to stat %s: %m", arg_input);
 
         if (S_ISDIR(st.st_mode))
-                r = sd_journal_open_directory(&j, arg_input, 0);
+                r = sd_journal_open_directory(&j, arg_input, /* flags= */ 0);
         else
-                r = sd_journal_open_files(&j, (const char*[]) { arg_input, NULL }, 0);
+                r = sd_journal_open_files(&j, (const char*[]) { arg_input, NULL }, /* flags= */ 0);
         if (r < 0)
                 return log_error_errno(r, "Failed to open %s: %m", arg_input);
-
-        ASSERT_OK(sd_journal_set_data_threshold(j, 0));
 
         if (arg_entries > 0) {
                 ASSERT_OK(sd_journal_seek_tail(j));
@@ -542,7 +541,7 @@ static void tracker_open(Tracker *t, int fd) {
         assert(fd >= 0);
 
         *t = (Tracker) {
-                .fd = ASSERT_OK(fd_reopen(fd, O_RDONLY|O_CLOEXEC)),
+                .fd = ASSERT_OK(fd_reopen(fd, O_RDONLY)),
         };
 
         /* Map the maximum size once, so the file can grow without remapping. Only the part below EOF may be
@@ -663,9 +662,9 @@ static int foreach_journal_file(const char *path, file_callback_t callback, void
                 if (!endswith(de->d_name, ".journal"))
                         continue;
 
-                fd = openat(dirfd(d), de->d_name, O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+                fd = xopenat(dirfd(d), de->d_name, O_RDONLY|O_NOFOLLOW);
                 if (fd < 0)
-                        return log_error_errno(errno, "Failed to open %s/%s: %m", path, de->d_name);
+                        return log_error_errno(fd, "Failed to open %s/%s: %m", path, de->d_name);
 
                 if (fstat(fd, &st) < 0)
                         return log_error_errno(errno, "Failed to stat %s/%s: %m", path, de->d_name);
@@ -694,7 +693,7 @@ static int account_file(int fd, const struct stat *st, void *userdata) {
         result->disk_bytes += (uint64_t) st2.st_blocks * 512U;
 
         ASSERT_NOT_NULL(m = mmap_cache_new());
-        r = journal_file_open(fd, NULL, O_RDONLY, 0, 0, UINT64_MAX, NULL, m, NULL, &f);
+        r = journal_file_open(fd, /* fname= */ NULL, O_RDONLY, /* file_flags= */ 0, /* mode= */ 0, UINT64_MAX, /* metrics= */ NULL, m, /* template= */ NULL, &f);
         if (r < 0)
                 return log_error_errno(r, "Failed to open journal file: %m");
 
@@ -783,7 +782,7 @@ static int write_test(const Workload *w, const char *path, WriteResult *result) 
 
         heap_start = heap_in_use();
 
-        r = journal_file_open_reliably(fn, O_RDWR|O_CREAT, flags, 0640, UINT64_MAX, &metrics, mmap_cache, &f);
+        r = journal_file_open_reliably(fn, O_RDWR|O_CREAT, flags, 0640, UINT64_MAX, &metrics, mmap_cache, /* seqnum_id= */ NULL, &f);
         if (r < 0)
                 return log_error_errno(r, "Failed to open %s: %m", fn);
 
@@ -820,13 +819,13 @@ static int write_test(const Workload *w, const char *path, WriteResult *result) 
                         dirty = false;
                 }
 
-                rotate = journal_file_rotate_suggested(f, 0, LOG_DEBUG);
+                rotate = journal_file_rotate_suggested(f, /* max_file_usec= */ 0, LOG_DEBUG);
 
                 for (unsigned attempt = 0;; attempt++) {
                         if (rotate) {
                                 Tracker old = TAKE_GENERIC(tracker, Tracker, (Tracker) { .fd = -EBADF });
 
-                                r = journal_file_rotate(&f, mmap_cache, flags, UINT64_MAX, /* deferred_closes= */ NULL);
+                                r = journal_file_rotate(&f, mmap_cache, flags, UINT64_MAX, /* seqnum_id= */ NULL, /* deferred_closes= */ NULL);
                                 if (r < 0)
                                         return log_error_errno(r, "Failed to rotate %s: %m", fn);
 
@@ -1169,11 +1168,9 @@ static int read_test_once(ReadContext *c, read_test_t func, usec_t *ret_usec, ui
 
         start = now(CLOCK_MONOTONIC);
 
-        r = sd_journal_open_directory(&j, c->path, 0);
+        r = sd_journal_open_directory(&j, c->path, /* flags= */ 0);
         if (r < 0)
                 return log_error_errno(r, "Failed to open %s: %m", c->path);
-
-        ASSERT_OK(sd_journal_set_data_threshold(j, 0));
 
         r = func(c, j);
         if (r < 0)
@@ -1199,7 +1196,7 @@ static int read_test(const Workload *w, const char *path, Report *report) {
                 };
                 uint64_t read_bytes;
 
-                r = foreach_journal_file(path, evict_file, NULL);
+                r = foreach_journal_file(path, evict_file, /* userdata= */ NULL);
                 if (r < 0)
                         return r;
 
@@ -1212,7 +1209,7 @@ static int read_test(const Workload *w, const char *path, Report *report) {
 
                 read_bytes = proc_io_field("read_bytes");
 
-                r = read_test_once(&c, test->func, &result->cold_usec, NULL);
+                r = read_test_once(&c, test->func, &result->cold_usec, /* ret_heap= */ NULL);
                 if (r < 0)
                         return r;
 
@@ -1261,7 +1258,7 @@ static int follow_writer(const Workload *w, const char *path, uint64_t n, int re
         ASSERT_NOT_NULL(mmap_cache = mmap_cache_new());
         ASSERT_NOT_NULL(fn = path_join(path, "system.journal"));
 
-        r = journal_file_open_reliably(fn, O_RDWR|O_CREAT, arg_compress ? JOURNAL_COMPRESS : 0, 0640, UINT64_MAX, &metrics, mmap_cache, &f);
+        r = journal_file_open_reliably(fn, O_RDWR|O_CREAT, arg_compress ? JOURNAL_COMPRESS : 0, 0640, UINT64_MAX, &metrics, mmap_cache, /* seqnum_id= */ NULL, &f);
         if (r < 0)
                 return log_error_errno(r, "Failed to open %s: %m", fn);
 
@@ -1270,7 +1267,7 @@ static int follow_writer(const Workload *w, const char *path, uint64_t n, int re
         ASSERT_OK(journal_file_enable_post_change_timer(f, e, 250 * USEC_PER_MSEC));
 
         /* Give the reader a file with one entry to open, then wait until it is ready. */
-        r = journal_file_append_entry(f, &w->entries[0].ts, &w->entries[0].boot_id, w->iovecs + w->entries[0].first_iovec, w->entries[0].n_iovec, NULL, NULL, NULL, NULL);
+        r = journal_file_append_entry(f, &w->entries[0].ts, &w->entries[0].boot_id, w->iovecs + w->entries[0].first_iovec, w->entries[0].n_iovec, /* seqnum= */ NULL, /* seqnum_id= */ NULL, /* ret_object= */ NULL, /* ret_offset= */ NULL);
         if (r < 0)
                 return log_error_errno(r, "Failed to append entry: %m");
         journal_file_post_change(f);
@@ -1286,11 +1283,11 @@ static int follow_writer(const Workload *w, const char *path, uint64_t n, int re
                 if (t < target)
                         (void) usleep_safe(target - t);
 
-                r = journal_file_append_entry(f, &entry->ts, &entry->boot_id, w->iovecs + entry->first_iovec, entry->n_iovec, NULL, NULL, NULL, NULL);
+                r = journal_file_append_entry(f, &entry->ts, &entry->boot_id, w->iovecs + entry->first_iovec, entry->n_iovec, /* seqnum= */ NULL, /* seqnum_id= */ NULL, /* ret_object= */ NULL, /* ret_offset= */ NULL);
                 if (r < 0)
                         return log_error_errno(r, "Failed to append entry: %m");
 
-                ASSERT_OK(sd_event_run(e, 0));
+                ASSERT_OK(sd_event_run(e, /* timeout= */ 0));
         }
 
         return 0;
@@ -1325,7 +1322,7 @@ static int follow_test(const Workload *w, const char *path, const char *match, F
 
         ASSERT_OK(loop_read_exact(ready[0], &(char) { 0 }, 1, /* do_poll= */ true));
 
-        r = sd_journal_open_directory(&j, dir, 0);
+        r = sd_journal_open_directory(&j, dir, /* flags= */ 0);
         if (r < 0)
                 return log_error_errno(r, "Failed to open %s: %m", dir);
 
@@ -1432,7 +1429,7 @@ static int run_format(const Workload *w, const Format *format, Report *report) {
 
         /* One process per format: the journal code caches $SYSTEMD_JOURNAL_COMPACT and
          * $SYSTEMD_JOURNAL_KEYED_HASH per thread, and resource usage stays separate per format. */
-        r = ASSERT_OK(pidref_safe_fork("(benchmark)", FORK_DEATHSIG_SIGKILL|FORK_LOG|FORK_WAIT|FORK_REOPEN_LOG, NULL));
+        r = ASSERT_OK(pidref_safe_fork("(benchmark)", FORK_DEATHSIG_SIGKILL|FORK_LOG|FORK_WAIT|FORK_REOPEN_LOG, /* ret= */ NULL));
         if (r == 0) {
                 Report child = {};
 
@@ -1454,7 +1451,7 @@ static int run_format(const Workload *w, const Format *format, Report *report) {
                 }
 
                 if (arg_follow) {
-                        r = follow_test(w, arg_output, NULL, child.follow + 0);
+                        r = follow_test(w, arg_output, /* match= */ NULL, child.follow + 0);
                         if (r >= 0)
                                 r = follow_test(w, arg_output, "NOSUCHFIELD=nothing", child.follow + 1);
                         if (r < 0)
@@ -1486,7 +1483,7 @@ static Table* report_table_new(const char *title, const char *extra, const Forma
 
         /* Minimum widths, so that the columns of all tables line up */
         ASSERT_OK(table_add_many(t, TABLE_HEADER, title, TABLE_SET_MINIMUM_WIDTH, (size_t) 34));
-        ASSERT_OK(table_set_json_field_name(t, 0, "name"));
+        ASSERT_OK(table_set_json_field_name(t, /* idx= */ 0, "name"));
 
         size_t column = 1;
         for (size_t i = 0; i < n; i++) {
@@ -1510,7 +1507,7 @@ static Table* report_table_new(const char *title, const char *extra, const Forma
                         ASSERT_OK(table_set_json_field_name(t, column++, json_name));
                 }
         }
-        ASSERT_OK(table_add_cell(t, NULL, TABLE_EMPTY, NULL));
+        ASSERT_OK(table_add_cell(t, /* ret_cell= */ NULL, TABLE_EMPTY, /* data= */ NULL));
         ASSERT_OK(table_set_json_field_name(t, column, "unit"));
 
         return TAKE_PTR(t);
@@ -1527,12 +1524,12 @@ static void report_table_add_row(
 
         bool extra = table_get_columns(t) > n + 2;
 
-        ASSERT_OK(table_add_cell(t, NULL, TABLE_STRING, label));
+        ASSERT_OK(table_add_cell(t, /* ret_cell= */ NULL, TABLE_STRING, label));
 
         for (size_t i = 0; i < n; i++) {
                 /* Whole numbers are integers in JSON too. The values are not negative, hence round by adding 0.5. */
                 if (decimals == 0)
-                        ASSERT_OK(table_add_cell(t, NULL, TABLE_UINT64, &(uint64_t) { (uint64_t) (values[i] + 0.5) }));
+                        ASSERT_OK(table_add_cell(t, /* ret_cell= */ NULL, TABLE_UINT64, &(uint64_t) { (uint64_t) (values[i] + 0.5) }));
                 else
                         ASSERT_OK(table_add_many(t, TABLE_DOUBLE, values[i], TABLE_SET_DECIMALS, decimals));
 
@@ -1542,13 +1539,13 @@ static void report_table_add_row(
                 if (ratio && values[0] > 0)
                         ASSERT_OK(table_add_many(t, TABLE_DOUBLE, values[i] / values[0], TABLE_SET_DECIMALS, 2U));
                 else
-                        ASSERT_OK(table_add_cell(t, NULL, TABLE_EMPTY, NULL));
+                        ASSERT_OK(table_add_cell(t, /* ret_cell= */ NULL, TABLE_EMPTY, /* data= */ NULL));
         }
 
         if (isempty(unit))
-                ASSERT_OK(table_add_cell(t, NULL, TABLE_EMPTY, NULL));
+                ASSERT_OK(table_add_cell(t, /* ret_cell= */ NULL, TABLE_EMPTY, /* data= */ NULL));
         else
-                ASSERT_OK(table_add_cell(t, NULL, TABLE_STRING, unit));
+                ASSERT_OK(table_add_cell(t, /* ret_cell= */ NULL, TABLE_STRING, unit));
 }
 
 static void report_table_print(Table *t, const char *json_key, sd_json_variant **json) {
@@ -1650,7 +1647,7 @@ static void print_reports(const Workload *w, const Format **used, const Report *
 
                 for (size_t i = 0; i < n; i++)
                         v[i] = (double) reports[i].write.append_cpu_nsec / (double) MAX(reports[i].write.n_entries, UINT64_C(1));
-                report_table_add_row(t, "append CPU time per entry", v, n, 0, /* ratio= */ false, "ns");
+                report_table_add_row(t, "append CPU time per entry", v, n, /* decimals= */ 0, /* ratio= */ false, "ns");
 
                 report_table_print(t, "write", &json);
         }
@@ -1662,7 +1659,7 @@ static void print_reports(const Workload *w, const Format **used, const Report *
                 print_follow_reports(used, reports, n, &json);
 
         if (sd_json_format_enabled(arg_json_format_flags))
-                ASSERT_OK(sd_json_variant_dump(json, arg_json_format_flags, stdout, NULL));
+                ASSERT_OK(sd_json_variant_dump(json, arg_json_format_flags, stdout, /* prefix= */ NULL));
 }
 
 static void print_read_reports(const Format **used, const Report *reports, size_t n, sd_json_variant **json) {
@@ -1699,16 +1696,16 @@ static void print_read_reports(const Format **used, const Report *reports, size_
         _cleanup_(table_unrefp) Table *table = report_table_new("READ: results", "same", used, n);
 
         for (size_t k = 0; k < ELEMENTSOF(read_tests); k++) {
-                ASSERT_OK(table_add_cell(table, NULL, TABLE_STRING, read_tests[k].name));
+                ASSERT_OK(table_add_cell(table, /* ret_cell= */ NULL, TABLE_STRING, read_tests[k].name));
 
                 for (size_t i = 0; i < n; i++) {
-                        ASSERT_OK(table_add_cell(table, NULL, TABLE_UINT64, &reports[i].read[k].n_results));
+                        ASSERT_OK(table_add_cell(table, /* ret_cell= */ NULL, TABLE_UINT64, &reports[i].read[k].n_results));
                         if (i > 0)
-                                ASSERT_OK(table_add_cell(table, NULL, TABLE_BOOLEAN,
+                                ASSERT_OK(table_add_cell(table, /* ret_cell= */ NULL, TABLE_BOOLEAN,
                                                          &(bool) { reports[i].read[k].digest == reports[0].read[k].digest }));
                 }
 
-                ASSERT_OK(table_add_cell(table, NULL, TABLE_EMPTY, NULL));
+                ASSERT_OK(table_add_cell(table, /* ret_cell= */ NULL, TABLE_EMPTY, /* data= */ NULL));
         }
 
         report_table_print(table, "readResults", json);
@@ -1726,15 +1723,15 @@ static void print_follow_reports(const Format **used, const Report *reports, siz
 
                 for (size_t i = 0; i < n; i++)
                         v[i] = reports[i].follow[k].n_entries;
-                report_table_add_row(t, "entries written", v, n, 0, /* ratio= */ false, "");
+                report_table_add_row(t, "entries written", v, n, /* decimals= */ 0, /* ratio= */ false, "");
 
                 for (size_t i = 0; i < n; i++)
                         v[i] = reports[i].follow[k].n_results;
-                report_table_add_row(t, "entries read", v, n, 0, /* ratio= */ false, "");
+                report_table_add_row(t, "entries read", v, n, /* decimals= */ 0, /* ratio= */ false, "");
 
                 for (size_t i = 0; i < n; i++)
                         v[i] = reports[i].follow[k].n_wakeups;
-                report_table_add_row(t, "wakeups", v, n, 0, /* ratio= */ false, "");
+                report_table_add_row(t, "wakeups", v, n, /* decimals= */ 0, /* ratio= */ false, "");
 
                 for (size_t i = 0; i < n; i++)
                         v[i] = (double) reports[i].follow[k].n_wakeups * USEC_PER_SEC / (double) MAX(reports[i].follow[k].wall_usec, UINT64_C(1));
@@ -1875,11 +1872,11 @@ static int run(int argc, char *argv[]) {
                 }
 
         /* journal_file_open() requires a valid machine id */
-        if (sd_id128_get_machine(NULL) < 0)
+        if (sd_id128_get_machine(/* ret= */ NULL) < 0)
                 return log_tests_skipped("No valid machine ID found");
 
         if (!arg_output) {
-                r = mkdtemp_malloc("/var/tmp/test-journal-benchmark-XXXXXX", &tmp);
+                r = mkdtemp_malloc(LOCALSTATEDIR SYSTEM_TMPDIR "/test-journal-benchmark-XXXXXX", &tmp);
                 if (r < 0)
                         return log_error_errno(r, "Failed to create output directory: %m");
 

@@ -18,6 +18,7 @@
 #include <xen/xen.h>
 
 #include "errno-util.h"
+#include "fs-util.h"
 #endif
 
 #include "alloc-util.h"
@@ -27,7 +28,6 @@
 #include "kernel-image.h"
 #include "log.h"
 #include "memfd-util.h"
-#include "memory-util.h"
 #include "pe-binary.h"
 #include "proc-cmdline.h"
 #include "reboot-util.h"
@@ -169,13 +169,13 @@ static int xen_kexec_command(uint64_t cmd) {
             (cmd == KEXEC_CMD_kexec && sizeof(xen_kexec_exec_t) > size))
                 return log_debug_errno(SYNTHETIC_ERRNO(EINVAL), "page_size is too small for hypercall");
 
-        privcmd_fd = open("/dev/xen/privcmd", O_RDWR|O_CLOEXEC);
+        privcmd_fd = xopenat(AT_FDCWD, "/dev/xen/privcmd", O_RDWR);
         if (privcmd_fd < 0)
-                return log_debug_errno(errno, "Cannot access /dev/xen/privcmd: %m");
+                return log_debug_errno(privcmd_fd, "Cannot access /dev/xen/privcmd: %m");
 
-        buf_fd = open("/dev/xen/hypercall", O_RDWR|O_CLOEXEC);
+        buf_fd = xopenat(AT_FDCWD, "/dev/xen/hypercall", O_RDWR);
         if (buf_fd < 0)
-                return log_debug_errno(errno, "Cannot access /dev/xen/hypercall: %m");
+                return log_debug_errno(buf_fd, "Cannot access /dev/xen/hypercall: %m");
 
         buffer = mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_SHARED, buf_fd, 0);
         if (buffer == MAP_FAILED)
@@ -269,10 +269,16 @@ static int pe_section_to_memfd(int fd, const IMAGE_SECTION_HEADER *section, cons
         if (memfd < 0)
                 return log_error_errno(memfd, "Failed to create memfd for PE section '%s': %m", name);
 
-        if (lseek(fd, offset, SEEK_SET) < 0)
-                return log_error_errno(errno, "Failed to seek to PE section '%s': %m", name);
-
-        r = copy_bytes(fd, memfd, size, /* copy_flags= */ 0);
+        /* copy_bytes_offset() can't use sendfile() when a target offset is given. copy_file_range() fails
+         * with EXDEV when the UKI is on another file system, and the copy then falls back to read() and
+         * pwrite(). Nothing else uses the memfd, so we write at its file offset instead. */
+        r = copy_bytes_offset(
+                        fd,
+                        /* foffset= */ &(uint64_t) { offset },
+                        memfd,
+                        /* toffset= */ NULL,
+                        size,
+                        /* copy_flags= */ 0);
         if (r < 0)
                 return log_error_errno(r, "Failed to copy PE section '%s': %m", name);
 

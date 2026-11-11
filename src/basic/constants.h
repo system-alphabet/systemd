@@ -51,6 +51,13 @@
 #define CONF_PATHS_STRV(n)                      \
         STRV_MAKE(CONF_PATHS(n))
 
+#define UNIT_INVOCATION_PARTIAL_PATH      "/systemd/units/invocation"
+#define UNIT_INVOCATION_PATH              RUNSTATEDIR UNIT_INVOCATION_PARTIAL_PATH
+#define UNIT_LOG_LEVEL_MAX_PATH           RUNSTATEDIR "/systemd/units/log-level-max"
+#define UNIT_LOG_EXTRA_FIELDS_PATH        RUNSTATEDIR "/systemd/units/log-extra-fields"
+#define UNIT_LOG_RATE_LIMIT_INTERVAL_PATH RUNSTATEDIR "/systemd/units/log-rate-limit-interval"
+#define UNIT_LOG_RATE_LIMIT_BURST_PATH    RUNSTATEDIR "/systemd/units/log-rate-limit-burst"
+
 /* The limit for PID 1 itself (which is not inherited to children) */
 #define HIGH_RLIMIT_MEMLOCK (1024ULL*1024ULL*64ULL)
 
@@ -70,6 +77,8 @@
 #define VARLINK_DIR_OOMD_PREKILL_HOOK RUNSTATEDIR "/systemd/oomd.prekill.hook/"
 /* Directory whose sockets receive io.systemd.SysUpdate.Notify() after a successful sysupdate run */
 #define VARLINK_DIR_SYSUPDATE_NOTIFY_HOOK RUNSTATEDIR "/systemd/sysupdate/notify/"
+/* Directory whose sockets systemd-sysupdate queries via io.systemd.SysUpdate.Provider for component definitions */
+#define VARLINK_DIR_SYSUPDATE_PROVIDER RUNSTATEDIR "/systemd/sysupdate/provider/"
 
 /* Recommended baseline - see README for details */
 #define KERNEL_BASELINE_VERSION "5.14"

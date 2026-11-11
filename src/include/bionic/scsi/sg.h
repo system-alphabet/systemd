@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
+#include <stddef.h>
+
 #include_next <scsi/sg.h>
 
 /* SG_FLAG_LUN_INHIBIT was renamed to SG_FLAG_UNUSED_LUN_INHIBIT in newer kernel headers.

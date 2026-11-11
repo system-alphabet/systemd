@@ -295,7 +295,7 @@ TEST(pe_load_sections_uint32_overflow_sum) {
 
 /* Zero sections: bounds check loop runs zero times, fstat still succeeds. */
 TEST(pe_load_sections_zero_sections) {
-        _cleanup_close_ int fd = build_pe_file(NULL, /* n_sections= */ 0, /* override_file_size= */ 0);
+        _cleanup_close_ int fd = build_pe_file(/* specs= */ NULL, /* n_sections= */ 0, /* override_file_size= */ 0);
         _cleanup_free_ IMAGE_DOS_HEADER *dos = NULL;
         _cleanup_free_ PeHeader *pe = NULL;
         _cleanup_free_ IMAGE_SECTION_HEADER *sections = NULL;
@@ -367,13 +367,11 @@ TEST(pe_read_section_data_reads_raw_data_only) {
         _cleanup_free_ void *data = NULL;
         size_t size;
         ASSERT_OK(pe_read_section_data(fd, sections + 0, SIZE_MAX, &data, &size));
-        ASSERT_EQ(size, 16U);
-        ASSERT_EQ(memcmp(data, "0123456789abcdef", size), 0);
+        ASSERT_MEMEQ_NN(data, size, "0123456789abcdef", 16U);
 
         data = mfree(data);
         ASSERT_OK(pe_read_section_data(fd, sections + 1, SIZE_MAX, &data, &size));
-        ASSERT_EQ(size, 8U);
-        ASSERT_EQ(memcmp(data, "ABCDEFGH", size), 0);
+        ASSERT_MEMEQ_NN(data, size, "ABCDEFGH", 8U);
 }
 
 /* ======================================================================
@@ -537,7 +535,7 @@ TEST_RET(uki_hash_empty_pe_does_not_reject) {
         if (dlopen_libcrypto(LOG_DEBUG) < 0)
                 return log_tests_skipped("openssl not available");
 
-        _cleanup_close_ int fd = build_pe_file(NULL, /* n_sections= */ 0, /* override_file_size= */ 0);
+        _cleanup_close_ int fd = build_pe_file(/* specs= */ NULL, /* n_sections= */ 0, /* override_file_size= */ 0);
         _cleanup_free_ IMAGE_DOS_HEADER *dos = NULL;
         _cleanup_free_ PeHeader *pe = NULL;
         _cleanup_free_ IMAGE_SECTION_HEADER *sections = NULL;

@@ -50,6 +50,15 @@ const IMAGE_DATA_DIRECTORY* pe_header_get_data_directory(
         return PE_HEADER_OPTIONAL_FIELD(h, DataDirectory) + i;
 }
 
+bool pe_header_is_signed(const PeHeader *h) {
+        assert(h);
+
+        const IMAGE_DATA_DIRECTORY *certificate_table =
+                pe_header_get_data_directory(h, IMAGE_DATA_DIRECTORY_INDEX_CERTIFICATION_TABLE);
+
+        return certificate_table && le32toh(certificate_table->VirtualAddress) != 0;
+}
+
 const IMAGE_SECTION_HEADER* pe_section_table_find(
                 const IMAGE_SECTION_HEADER *sections,
                 size_t n_sections,
@@ -310,6 +319,56 @@ int pe_read_section_data_by_name(
         return pe_read_section_data(fd, section, max_size, ret, ret_size);
 }
 
+int pe_checksum(int fd, uint32_t *ret) {
+        _cleanup_free_ IMAGE_DOS_HEADER *dos_header = NULL;
+        _cleanup_free_ PeHeader *pe_header = NULL;
+        struct stat st;
+        int r;
+
+        assert(fd >= 0);
+        assert(ret);
+
+        if (fstat(fd, &st) < 0)
+                return log_debug_errno(errno, "Failed to stat file: %m");
+
+        r = pe_load_headers(fd, &dos_header, &pe_header);
+        if (r < 0)
+                return r;
+
+        uint32_t checksum = 0, checksum_offset = le32toh(dos_header->e_lfanew) + offsetof(PeHeader, optional.CheckSum);
+        size_t off = 0;
+        for (;;) {
+                uint16_t buf[32*1024];
+
+                ssize_t n = pread(fd, buf, sizeof(buf), off);
+                if (n == 0)
+                        break;
+                if (n < 0)
+                        return log_debug_errno(errno, "Failed to read from PE file: %m");
+                if (n % sizeof(uint16_t) != 0)
+                        return log_debug_errno(SYNTHETIC_ERRNO(EIO), "Short read from PE file");
+
+                for (size_t i = 0; i < (size_t) n / 2; i++) {
+                        size_t pos = off + i * sizeof(uint16_t);
+                        if (pos >= checksum_offset && pos < checksum_offset + sizeof(pe_header->optional.CheckSum))
+                                continue;
+
+                        uint16_t val = le16toh(buf[i]);
+
+                        checksum += val;
+                        checksum = (checksum >> 16) + (checksum & 0xffff);
+                }
+
+                off += n;
+        }
+
+        checksum = (checksum >> 16) + (checksum & 0xffff);
+        checksum += off;
+
+        *ret = checksum;
+        return 0;
+}
+
 bool pe_is_uki(const PeHeader *pe_header, const IMAGE_SECTION_HEADER *sections) {
         assert(pe_header);
         assert(sections || le16toh(pe_header->pe.NumberOfSections) == 0);
@@ -331,10 +390,12 @@ bool pe_is_addon(const PeHeader *pe_header, const IMAGE_SECTION_HEADER *sections
         if (le16toh(pe_header->optional.Subsystem) != IMAGE_SUBSYSTEM_EFI_APPLICATION)
                 return false;
 
-        /* Add-ons do not have a Linux kernel, but do have one of .cmdline, .dtb, .initrd or .ucode (currently) */
+        /* Add-ons do not have a Linux kernel, but do have one of .cmdline, .dtb, .dtbauto, .initrd or .ucode
+         * (currently, matching what systemd-stub loads from add-ons) */
         return !pe_header_find_section(pe_header, sections, ".linux") &&
                 (pe_header_find_section(pe_header, sections, ".cmdline") ||
                  pe_header_find_section(pe_header, sections, ".dtb") ||
+                 pe_header_find_section(pe_header, sections, ".dtbauto") ||
                  pe_header_find_section(pe_header, sections, ".initrd") ||
                  pe_header_find_section(pe_header, sections, ".ucode"));
 }
@@ -441,13 +502,13 @@ int pe_hash(int fd,
         if (!mdctx)
                 return log_oom_debug();
 
-        if (sym_EVP_DigestInit_ex(mdctx, md, NULL) != 1)
+        if (sym_EVP_DigestInit_ex(mdctx, md, /* impl= */ NULL) != 1)
                 return log_debug_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE), "Failed to allocate message digest.");
 
         /* Everything from beginning of file to CheckSum field in PE header */
         p = (uint64_t) le32toh(dos_header->e_lfanew) +
                 offsetof(PeHeader, optional.CheckSum);
-        r = hash_file(fd, mdctx, 0, p);
+        r = hash_file(fd, mdctx, /* offset= */ 0, p);
         if (r < 0)
                 return r;
         p += sizeof(le32_t);
@@ -513,56 +574,6 @@ int pe_hash(int fd,
         return 0;
 }
 
-int pe_checksum(int fd, uint32_t *ret) {
-        _cleanup_free_ IMAGE_DOS_HEADER *dos_header = NULL;
-        _cleanup_free_ PeHeader *pe_header = NULL;
-        struct stat st;
-        int r;
-
-        assert(fd >= 0);
-        assert(ret);
-
-        if (fstat(fd, &st) < 0)
-                return log_debug_errno(errno, "Failed to stat file: %m");
-
-        r = pe_load_headers(fd, &dos_header, &pe_header);
-        if (r < 0)
-                return r;
-
-        uint32_t checksum = 0, checksum_offset = le32toh(dos_header->e_lfanew) + offsetof(PeHeader, optional.CheckSum);
-        size_t off = 0;
-        for (;;) {
-                uint16_t buf[32*1024];
-
-                ssize_t n = pread(fd, buf, sizeof(buf), off);
-                if (n == 0)
-                        break;
-                if (n < 0)
-                        return log_debug_errno(errno, "Failed to read from PE file: %m");
-                if (n % sizeof(uint16_t) != 0)
-                        return log_debug_errno(SYNTHETIC_ERRNO(EIO), "Short read from PE file");
-
-                for (size_t i = 0; i < (size_t) n / 2; i++) {
-                        size_t pos = off + i * sizeof(uint16_t);
-                        if (pos >= checksum_offset && pos < checksum_offset + sizeof(pe_header->optional.CheckSum))
-                                continue;
-
-                        uint16_t val = le16toh(buf[i]);
-
-                        checksum += val;
-                        checksum = (checksum >> 16) + (checksum & 0xffff);
-                }
-
-                off += n;
-        }
-
-        checksum = (checksum >> 16) + (checksum & 0xffff);
-        checksum += off;
-
-        *ret = checksum;
-        return 0;
-}
-
 typedef void* SectionHashArray[_UNIFIED_SECTION_MAX];
 
 static void section_hash_array_done(SectionHashArray *array) {
@@ -623,7 +634,7 @@ int uki_hash(int fd,
                 if (!mdctx)
                         return log_oom_debug();
 
-                if (sym_EVP_DigestInit_ex(mdctx, md, NULL) != 1)
+                if (sym_EVP_DigestInit_ex(mdctx, md, /* impl= */ NULL) != 1)
                         return log_debug_errno(SYNTHETIC_ERRNO(ENOTRECOVERABLE), "Failed to allocate message digest.");
 
                 r = hash_file(fd, mdctx, le32toh(section->PointerToRawData), MIN(le32toh(section->VirtualSize), le32toh(section->SizeOfRawData)));

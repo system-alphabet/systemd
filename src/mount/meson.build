@@ -7,8 +7,6 @@ endif
 executables += [
         executable_template + {
                 'name' : 'systemd-mount',
-                'public' : true,
-                'conditions' : ['ENABLE_SYSTEMD_MOUNT'],
                 'sources' : files('mount-tool.c'),
                 'dependencies' : libmount_cflags,
                 'symlinks' : [

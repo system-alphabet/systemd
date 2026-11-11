@@ -18,7 +18,6 @@ bootctl_sources = files(
 executables += [
         executable_template + {
                 'name' : 'bootctl',
-                'public' : true,
                 'conditions' : [
                           'ENABLE_BOOTCTL',
                           'HAVE_BLKID',

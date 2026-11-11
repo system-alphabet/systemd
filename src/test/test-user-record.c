@@ -59,7 +59,7 @@ TEST(shell_validation) {
 
         r = sd_id128_get_machine(&mid);
         if (ERRNO_IS_NEG_MACHINE_ID_UNSET(r))
-                return (void) log_tests_skipped("/etc/machine-id missing");
+                return (void) log_tests_skipped(SYSCONF_DIR "/machine-id missing");
         ASSERT_OK(r);
 
         FOREACH_ELEMENT(shell, invalid_shells) {

@@ -13,11 +13,11 @@
 #include "efi-loader.h"
 #include "efivars.h"
 #include "env-file.h"
-#include "errno-util.h"
 #include "extract-word.h"
 #include "fd-util.h"
 #include "fileio.h"
 #include "find-esp.h"
+#include "fs-util.h"
 #include "json-util.h"
 #include "log.h"
 #include "parse-util.h"
@@ -172,8 +172,8 @@ static int mangle_path(
                 return -ENOMEM;
 
         /* We only reference files, never directories */
-        if (endswith(c, "/")) {
-                log_syntax(NULL, LOG_WARNING, fname, line, 0, "Path in field '%s' has trailing slash, ignoring: %s", field, c);
+        if (path_implies_directory(c)) {
+                log_syntax(NULL, LOG_WARNING, fname, line, 0, "Path in field '%s' refers to a directory, ignoring: %s", field, c);
                 *ret = NULL;
                 return 0;
         }
@@ -244,7 +244,7 @@ static int parse_path_many(
         _cleanup_strv_free_ char **l = NULL, **f = NULL;
         int r;
 
-        l = strv_split(p, NULL);
+        l = strv_split(p, /* separators= */ NULL);
         if (!l)
                 return -ENOMEM;
 
@@ -276,7 +276,7 @@ static int parse_extra(
 
         assert(extras);
 
-        _cleanup_strv_free_ char **l = strv_split(p, NULL);
+        _cleanup_strv_free_ char **l = strv_split(p, /* separators= */ NULL);
         if (!l)
                 return -ENOMEM;
 
@@ -291,13 +291,6 @@ static int parse_extra(
                 BootEntryExtraType type = boot_entry_extra_type_from_filename(c);
                 if (type < 0) {
                         log_debug_errno(type, "Failed to determine boot entry extra type of '%s', skipping: %m", c);
-                        continue;
-                }
-
-                /* Let's filter out EFI addons for now. We have no protocol for passing them from sd-boot to
-                 * sd-stub, hence supporting them would require major plumbing first. */
-                if (type == BOOT_ENTRY_ADDON) {
-                        log_debug("EFI addons are currently not supported for Type #1 entries, skipping '%s'.", c);
                         continue;
                 }
 
@@ -413,6 +406,40 @@ nothing:
         return 0;
 }
 
+static int pe_find_addon_sections(int fd, const char *path, char **ret_cmdline);
+
+static void boot_entry_load_type1_addon_cmdlines(BootEntry *entry) {
+        assert(entry);
+
+        FOREACH_ARRAY(extra, entry->local_extras.items, entry->local_extras.n_items) {
+                if (extra->type != BOOT_ENTRY_ADDON)
+                        continue;
+
+                /* systemd-boot only passes addons listed in "extra" lines to UKIs referenced via "uki" */
+                if (!entry->uki) {
+                        log_syntax(/* unit= */ NULL, LOG_WARNING, entry->path, /* config_line= */ 0, /* error= */ 0,
+                                   "Addon '%s' is only supported for entries with a 'uki' key, ignoring.",
+                                   extra->location);
+                        continue;
+                }
+
+                _cleanup_close_ int fd = chase_and_open(
+                                extra->location,
+                                entry->root,
+                                CHASE_PREFIX_ROOT|CHASE_PROHIBIT_SYMLINKS|CHASE_MUST_BE_REGULAR,
+                                O_RDONLY|O_CLOEXEC|O_NONBLOCK|O_NOCTTY,
+                                /* ret_path= */ NULL);
+                if (fd < 0) {
+                        log_debug_errno(fd, "Failed to open '%s', ignoring: %m", extra->location);
+                        continue;
+                }
+
+                /* Try to extract the command line, but let's handle any failures gracefully, but still
+                 * mention the extra file exists. */
+                (void) pe_find_addon_sections(fd, extra->location, &extra->cmdline);
+        }
+}
+
 static int boot_entry_load_type1(
                 FILE *f,
                 const char *root,
@@ -471,7 +498,7 @@ static int boot_entry_load_type1(
                         continue;
 
                 const char *p = buf;
-                r = extract_first_word(&p, &field, NULL, 0);
+                r = extract_first_word(&p, &field, /* separators= */ NULL, /* flags= */ 0);
                 if (r < 0) {
                         log_syntax(NULL, LOG_WARNING, tmp.path, line, r, "Failed to parse, ignoring line: %m");
                         continue;
@@ -529,6 +556,8 @@ static int boot_entry_load_type1(
                 if (r < 0)
                         return log_syntax(NULL, LOG_ERR, tmp.path, line, r, "Error while parsing: %m");
         }
+
+        boot_entry_load_type1_addon_cmdlines(&tmp);
 
         *ret = TAKE_STRUCT(tmp);
         return 0;
@@ -608,7 +637,7 @@ int boot_loader_read_conf(BootConfig *config, FILE *file, const char *path) {
                         continue;
 
                 const char *p = buf;
-                r = extract_first_word(&p, &field, NULL, 0);
+                r = extract_first_word(&p, &field, /* separators= */ NULL, /* flags= */ 0);
                 if (r < 0) {
                         log_syntax(NULL, LOG_WARNING, path, line, r, "Failed to parse, ignoring line: %m");
                         continue;
@@ -773,7 +802,7 @@ static int boot_entries_find_type1(
         assert(root);
         assert(dir);
 
-        dir_fd = chase_and_open(dir, root, CHASE_PREFIX_ROOT|CHASE_PROHIBIT_SYMLINKS, O_DIRECTORY|O_CLOEXEC, &full);
+        dir_fd = chase_and_open(dir, root, CHASE_PREFIX_ROOT|CHASE_PROHIBIT_SYMLINKS, O_DIRECTORY, &full);
         if (dir_fd == -ENOENT)
                 return 0;
         if (dir_fd < 0)
@@ -1317,9 +1346,9 @@ static int boot_entries_find_unified_extras(
                 if (!location)
                         return log_oom();
 
-                _cleanup_close_ int pin_fd = openat(dirfd(d), de->d_name, O_PATH|O_CLOEXEC|O_NOFOLLOW);
+                _cleanup_close_ int pin_fd = xopenat(dirfd(d), de->d_name, O_PATH|O_NOFOLLOW);
                 if (pin_fd < 0) {
-                        log_debug_errno(errno, "Failed to pin '%s', ignoring: %m", location);
+                        log_debug_errno(pin_fd, "Failed to pin '%s', ignoring: %m", location);
                         continue;
                 }
 
@@ -1339,7 +1368,7 @@ static int boot_entries_find_unified_extras(
 
                 _cleanup_free_ char *cmdline = NULL;
                 if (type == BOOT_ENTRY_ADDON) {
-                        _cleanup_close_ int fd = fd_reopen(pin_fd, O_RDONLY|O_CLOEXEC|O_NONBLOCK|O_NOCTTY);
+                        _cleanup_close_ int fd = fd_reopen(pin_fd, O_RDONLY|O_NONBLOCK|O_NOCTTY);
                         if (fd < 0) {
                                 log_debug_errno(fd, "Failed to open '%s', ignoring: %m", location);
                                 continue;
@@ -1367,7 +1396,7 @@ static int boot_entries_find_unified_global_extras(
 
         assert(extras);
 
-        _cleanup_close_ int where_fd = RET_NERRNO(open(where, O_DIRECTORY|O_CLOEXEC));
+        _cleanup_close_ int where_fd = xopenat(AT_FDCWD, where, O_DIRECTORY);
         if (where_fd == -ENOENT)
                 return 0;
         if (where_fd < 0)
@@ -1434,9 +1463,9 @@ static int boot_entries_find_unified(
                 if (!endswith_no_case(de->d_name, ".efi"))
                         continue;
 
-                _cleanup_close_ int fd = openat(dirfd(d), de->d_name, O_RDONLY|O_CLOEXEC|O_NONBLOCK|O_NOFOLLOW|O_NOCTTY);
+                _cleanup_close_ int fd = xopenat(dirfd(d), de->d_name, O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_NOCTTY);
                 if (fd < 0) {
-                        log_warning_errno(errno, "Failed to open %s/%s, ignoring: %m", full, de->d_name);
+                        log_warning_errno(fd, "Failed to open %s/%s, ignoring: %m", full, de->d_name);
                         continue;
                 }
 
@@ -1806,7 +1835,7 @@ int boot_config_load_auto(
 
         if (!override_esp_path && !override_xbootldr_path) {
                 if (access(RUNSTATEDIR "/boot-loader-entries/", F_OK) >= 0)
-                        return boot_config_load(config, RUNSTATEDIR "/boot-loader-entries/", NULL);
+                        return boot_config_load(config, RUNSTATEDIR "/boot-loader-entries/", /* xbootldr_path= */ NULL);
 
                 if (errno != ENOENT)
                         return log_error_errno(errno,
@@ -1937,7 +1966,7 @@ static void boot_entry_file_list(
         assert(p);
         assert(pstatus);
 
-        int status = chase_and_access(p, root, CHASE_PREFIX_ROOT|CHASE_PROHIBIT_SYMLINKS, F_OK, NULL);
+        int status = chase_and_access(p, root, CHASE_PREFIX_ROOT|CHASE_PROHIBIT_SYMLINKS, F_OK, /* ret_path= */ NULL);
 
         /* Note that this shows two '/' between the root and the file. This is intentional to highlight (in
          * the absence of color support) to the user that the boot loader is only interested in the second
@@ -2334,7 +2363,7 @@ int show_boot_entries(const BootConfig *config, sd_json_format_flags_t json_form
                                 return log_oom();
                 }
 
-                return sd_json_variant_dump(array, json_format | SD_JSON_FORMAT_EMPTY_ARRAY, NULL, NULL);
+                return sd_json_variant_dump(array, json_format | SD_JSON_FORMAT_EMPTY_ARRAY, NULL, /* prefix= */ NULL);
         } else
                 for (size_t n = 0; n < config->n_entries; n++) {
                         r = show_boot_entry(

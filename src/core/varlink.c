@@ -337,12 +337,12 @@ static int vl_method_subscribe_managed_oom_cgroups(
 
         u = manager_get_unit_by_pidref(m, &pidref);
         if (!u)
-                return sd_varlink_error(link, SD_VARLINK_ERROR_PERMISSION_DENIED, NULL);
+                return sd_varlink_error(link, SD_VARLINK_ERROR_PERMISSION_DENIED, /* parameters= */ NULL);
 
         /* This is meant to be a deterrent and not actual security. The alternative is to check for the systemd-oom
          * user that this unit runs as, but NSS lookups are blocking and not allowed from PID 1. */
         if (!streq(u->id, "systemd-oomd.service"))
-                return sd_varlink_error(link, SD_VARLINK_ERROR_PERMISSION_DENIED, NULL);
+                return sd_varlink_error(link, SD_VARLINK_ERROR_PERMISSION_DENIED, /* parameters= */ NULL);
 
         r = sd_varlink_dispatch(link, parameters, /* dispatch_table= */ NULL, /* userdata= */ NULL);
         if (r != 0)
@@ -351,7 +351,7 @@ static int vl_method_subscribe_managed_oom_cgroups(
         /* We only take one subscriber for this method so return an error if there's already an existing one.
          * This shouldn't happen since systemd-oomd is the only client of this method. */
         if (FLAGS_SET(flags, SD_VARLINK_METHOD_MORE) && m->managed_oom_varlink)
-                return sd_varlink_error(link, "io.systemd.ManagedOOM.SubscriptionTaken", NULL);
+                return sd_varlink_error(link, "io.systemd.ManagedOOM.SubscriptionTaken", /* parameters= */ NULL);
 
         _cleanup_(sd_json_variant_unrefp) sd_json_variant *v = NULL;
 
@@ -393,6 +393,8 @@ static void vl_disconnect(sd_varlink_server *s, sd_varlink *link, void *userdata
                         u->varlink_unit_change = sd_varlink_unref(u->varlink_unit_change);
                         break;
                 }
+
+        varlink_job_drop_stashed_client(m, link);
 }
 
 int manager_setup_varlink_server(Manager *m) {
@@ -633,6 +635,7 @@ void manager_varlink_done(Manager *m) {
         sd_varlink_close_unref(TAKE_PTR(m->managed_oom_varlink));
 
         m->pending_reload_message_vl = sd_varlink_unref(m->pending_reload_message_vl);
+        m->stashed_varlink_job_clients = hashmap_free(m->stashed_varlink_job_clients);
 
         m->varlink_server = sd_varlink_server_unref(m->varlink_server);
         m->managed_oom_varlink = sd_varlink_close_unref(m->managed_oom_varlink);

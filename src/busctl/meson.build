@@ -10,13 +10,10 @@ busctl_export_sources = files(
 executables += [
         executable_template + {
                 'name' : 'busctl',
-                'public' : true,
-                'conditions' : ['ENABLE_BUSCTL'],
                 'sources' : busctl_sources,
                 'export' : busctl_export_sources,
         },
         test_template + {
-                'conditions' : ['ENABLE_BUSCTL'],
                 'sources' : files('test-busctl-introspect.c'),
                 'import' : ['busctl'],
         },

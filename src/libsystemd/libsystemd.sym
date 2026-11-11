@@ -1117,4 +1117,14 @@ LIBSYSTEMD_263 {
 global:
         sd_device_new_from_device_node_fd;
         sd_device_trigger_with_args;
+        sd_journal_get_data_to_fd;
+        sd_varlink_invoke_and_upgrade;
+        sd_varlink_invoke_and_upgradeb;
+        sd_varlink_wants_reply;
+        sd_pid_get_unit_cgroup;
+        sd_pid_get_user_unit_cgroup;
+        sd_pidfd_get_unit_cgroup;
+        sd_pidfd_get_user_unit_cgroup;
+        sd_peer_get_unit_cgroup;
+        sd_peer_get_user_unit_cgroup;
 } LIBSYSTEMD_262;

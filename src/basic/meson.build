@@ -55,6 +55,7 @@ basic_sources = files(
         'in-addr-util.c',
         'initrd-util.c',
         'inotify-util.c',
+        'io-uring-util.c',
         'io-util.c',
         'iovec-util.c',
         'iovec-wrapper.c',
@@ -121,6 +122,7 @@ basic_sources = files(
         'user-util.c',
         'utf8.c',
         'virt.c',
+        'web-util.c',
         'xattr-util.c',
 )
 
@@ -157,7 +159,7 @@ foreach item : [
                 gperf_file = custom_target(
                         input : list_txt,
                         output : '@0@-from-name.gperf'.format(item[0]),
-                        command : [generate_gperfs, item[0], item[2], '@INPUT@'] + item[3],
+                        command : [python, generate_gperfs, item[0], item[2], '@INPUT@'] + item[3],
                         capture : true)
 
                 target = custom_target(
@@ -183,7 +185,8 @@ basic_sources += generated_gperf_headers
 filesystem_sets_py = files('filesystem-sets.py')
 filesystem_sets_c = custom_target(
         output : 'filesystem-sets.c',
-        command : [filesystem_sets_py,
+        command : [python,
+                   filesystem_sets_py,
                    'fs-type-to-string',
                    'filesystem-sets',
                    'fs-in-group'],
@@ -191,7 +194,8 @@ filesystem_sets_c = custom_target(
 
 filesystems_gperf_gperf = custom_target(
         output : 'filesystems-gperf.gperf',
-        command : [filesystem_sets_py,
+        command : [python,
+                   filesystem_sets_py,
                    'gperf'],
         capture : true)
 

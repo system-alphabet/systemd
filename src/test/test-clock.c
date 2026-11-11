@@ -57,7 +57,7 @@ TEST(clock_is_localtime) {
 /* Test with the real /etc/adjtime */
 TEST(clock_is_localtime_system) {
         int r;
-        r = clock_is_localtime(NULL);
+        r = clock_is_localtime(/* adjtime_path= */ NULL);
 
         if (access(SYSCONF_DIR "/adjtime", R_OK) == 0) {
                 log_info(SYSCONF_DIR "/adjtime is readable, clock_is_localtime() == %i", r);

@@ -33,7 +33,7 @@ int make_lock_file_at(int dir_fd, const char *p, int operation, LockFile *ret) {
 
         /* We use UNPOSIX locks as they have nice semantics, and are mostly compatible with NFS. */
 
-        dfd = fd_reopen(dir_fd, O_CLOEXEC|O_PATH|O_DIRECTORY);
+        dfd = fd_reopen(dir_fd, O_PATH|O_DIRECTORY);
         if (dfd < 0)
                 return dfd;
 
@@ -43,7 +43,7 @@ int make_lock_file_at(int dir_fd, const char *p, int operation, LockFile *ret) {
 
         fd = xopenat_lock_full(dfd,
                                p,
-                               O_CREAT|O_RDWR|O_NOFOLLOW|O_CLOEXEC|O_NOCTTY,
+                               O_CREAT|O_RDWR|O_NOFOLLOW|O_NOCTTY,
                                /* xopen_flags= */ 0,
                                0600,
                                LOCK_UNPOSIX,
@@ -226,8 +226,9 @@ int lock_generic_with_timeout(int fd, LockType type, int operation, usec_t timeo
         if (r < 0)
                 return log_error_errno(r, "Failed to flock block device in child process: %m");
         if (r == 0) {
-                if (lock_generic(fd, type, operation) < 0) {
-                        log_error_errno(errno, "Unable to get an exclusive lock on the device: %m");
+                r = lock_generic(fd, type, operation);
+                if (r < 0) {
+                        log_error_errno(r, "Unable to get an exclusive lock on the device: %m");
                         _exit(EXIT_FAILURE);
                 }
 
